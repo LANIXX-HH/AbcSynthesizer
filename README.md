@@ -27,16 +27,14 @@ dem Handy.
 
 ## APK bauen
 
-**Release (empfohlen):** Tag setzen und pushen, z. B.
+**Release (empfohlen)** – zwei Wege:
 
-```sh
-git tag v1.0.1
-git push origin v1.0.1
-```
+- GitHub → *Actions → APK bauen → Run workflow*, Version eintragen (z. B. `1.0.0`). Der
+  Workflow baut die APK und legt das Release `v1.0.0` mit der APK an.
+- Oder auf GitHub ein Release veröffentlichen (*Releases → Draft a new release*, Tag z. B.
+  `v1.0.1`). Der Workflow baut die APK und hängt sie an dieses Release.
 
-Der Workflow „APK bauen“ erstellt dann ein GitHub-Release `Chorstimme 1.0.1` mit der APK als
-Download (Releases-Seite des Repositorys). Ohne Tag (normaler Push) liegt die APK nur als
-Artifact unter *Actions → Lauf → Artifacts*.
+Ohne Release (normaler Push) liegt die APK nur als Artifact unter *Actions → Lauf → Artifacts*.
 
 Die APK ist mit einem festen Schlüssel aus dem Repository signiert (`app/chorstimme.keystore`): direkt installierbar, neue Versionen lassen sich darüber installieren. Für den Play Store einen eigenen, geheimen Schlüssel verwenden.
 

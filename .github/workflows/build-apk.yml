@@ -1,12 +1,18 @@
 name: APK bauen
 
-# Push auf einen Branch: APK als Artifact.
-# Push eines Tags v* (z. B. v1.0.0): APK wird an ein GitHub-Release gehängt.
+# Push auf einen Branch:             APK als Artifact.
+# Release auf GitHub veröffentlicht: APK wird an dieses Release gehängt.
+# Manuell (Actions → Run workflow):  Release mit eingegebener Version anlegen, APK anhängen.
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, z. B. 1.0.0 (leer = nur Artifact)"
+        required: false
 
 permissions:
   contents: write
@@ -29,12 +35,27 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            echo "VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          else
-            echo "VERSION_NAME=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          MODE=artifact
+          TAG=""
+          if [ -n "$RELEASE_TAG" ]; then
+            MODE=upload
+            TAG="$RELEASE_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            MODE=create
+            TAG="v${INPUT_VERSION#v}"
           fi
+          if [ "$MODE" = artifact ]; then
+            VERSION_NAME="dev-${GITHUB_SHA::7}"
+          else
+            VERSION_NAME="${TAG#v}"
+          fi
+          echo "MODE=$MODE" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Build
@@ -44,16 +65,22 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk "Chorstimme-$VERSION_NAME.apk"
 
       - name: Artifact
-        if: github.ref_type != 'tag'
+        if: env.MODE == 'artifact'
         uses: actions/upload-artifact@v4
         with:
           name: Chorstimme-APK
           path: Chorstimme-*.apk
 
-      - name: Release
-        if: github.ref_type == 'tag'
+      - name: APK an Release hängen
+        if: env.MODE == 'upload'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "Chorstimme-$VERSION_NAME.apk" --clobber
+
+      - name: Release anlegen
+        if: env.MODE == 'create'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "Chorstimme-$VERSION_NAME.apk" \
+          gh release create "$TAG" "Chorstimme-$VERSION_NAME.apk" --target "$GITHUB_SHA" \
             --title "Chorstimme $VERSION_NAME" --generate-notes
