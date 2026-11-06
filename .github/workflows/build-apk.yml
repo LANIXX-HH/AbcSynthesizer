@@ -1,8 +1,15 @@
 name: APK bauen
 
+# Push auf einen Branch: APK als Artifact.
+# Push eines Tags v* (z. B. v1.0.0): APK wird an ein GitHub-Release gehängt.
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -21,12 +28,32 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION_NAME=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+          echo "VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+
       - name: Build
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk "Chorstimme-$VERSION_NAME.apk"
 
-      - uses: actions/upload-artifact@v4
+      - name: Artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
         with:
           name: Chorstimme-APK
-          path: app/build/outputs/apk/release/*.apk
+          path: Chorstimme-*.apk
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "Chorstimme-$VERSION_NAME.apk" \
+            --title "Chorstimme $VERSION_NAME" --generate-notes
