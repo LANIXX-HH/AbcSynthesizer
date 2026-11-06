@@ -34,6 +34,7 @@ import android.widget.Toast;
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader;
 
 import de.lanixx.chorstimme.core.AbcParser;
+import de.lanixx.chorstimme.core.AbcWriter;
 import de.lanixx.chorstimme.core.ChoirSynth;
 import de.lanixx.chorstimme.core.MidiWriter;
 import de.lanixx.chorstimme.core.Mp3Encoder;
@@ -64,6 +65,7 @@ public class MainActivity extends Activity {
     private static final int REQ_OPEN_ABC = 2;
     private static final int REQ_SAVE_MP3 = 3;
     private static final int REQ_SAVE_MIDI = 4;
+    private static final int REQ_SAVE_ABC = 5;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -79,7 +81,8 @@ public class MainActivity extends Activity {
     private SeekBar tempoBar, posBar;
     private Spinner emphasis;
     private CheckBox countIn;
-    private Button generateBtn, playBtn, saveMp3Btn, saveMidiBtn;
+    private Button generateBtn, playBtn, saveMp3Btn, saveMidiBtn, saveAbcBtn;
+    private LinearLayout exportRow;
     private ProgressBar progress;
     private LinearLayout playerBox;
 
@@ -222,15 +225,20 @@ public class MainActivity extends Activity {
         timeView.setGravity(Gravity.END);
         playerBox.addView(timeView, matchWrap(0));
 
-        LinearLayout saveRow = new LinearLayout(this);
-        saveRow.setOrientation(LinearLayout.HORIZONTAL);
         saveMp3Btn = button("MP3 speichern");
-        saveMidiBtn = button("MIDI speichern");
-        saveRow.addView(saveMp3Btn, weight());
-        saveRow.addView(saveMidiBtn, weight());
-        playerBox.addView(saveRow, matchWrap(dp(8)));
+        playerBox.addView(saveMp3Btn, matchWrap(dp(8)));
         saveMp3Btn.setOnClickListener(v -> save(REQ_SAVE_MP3, "audio/mpeg", baseName + ".mp3"));
+
+        // MIDI and ABC need no rendering: available as soon as the notes are read
+        exportRow = new LinearLayout(this);
+        exportRow.setOrientation(LinearLayout.HORIZONTAL);
+        saveMidiBtn = button("MIDI speichern");
+        saveAbcBtn = button("ABC speichern");
+        exportRow.addView(saveMidiBtn, weight());
+        exportRow.addView(saveAbcBtn, weight());
+        root.addView(exportRow, matchWrap(dp(8)));
         saveMidiBtn.setOnClickListener(v -> save(REQ_SAVE_MIDI, "audio/midi", baseName + ".mid"));
+        saveAbcBtn.setOnClickListener(v -> save(REQ_SAVE_ABC, "text/plain", baseName + ".abc"));
 
         lyricsView = new TextView(this);
         lyricsView.setTextSize(14);
@@ -290,10 +298,12 @@ public class MainActivity extends Activity {
         boolean ready = mp3 != null && !busy;
         playerBox.setVisibility(ready ? View.VISIBLE : View.GONE);
         saveMidiBtn.setEnabled(has && !busy);
+        saveAbcBtn.setEnabled(has && !busy);
+        exportRow.setVisibility(has ? View.VISIBLE : View.GONE);
     }
 
     private void optionsChanged() {
-        if (tempoLabel == null || generateBtn == null || playerBox == null) return;
+        if (tempoLabel == null || generateBtn == null || playerBox == null || exportRow == null) return;
         if (mp3 != null && !busy) statusView.setText("Einstellungen geändert – zum Anwenden neu erzeugen.");
         refresh();
     }
@@ -546,6 +556,9 @@ public class MainActivity extends Activity {
                 break;
             case REQ_SAVE_MIDI:
                 if (score != null) write(uri, MidiWriter.write(score, tempoFactor(), voiceGains()), "MIDI");
+                break;
+            case REQ_SAVE_ABC:
+                if (score != null) write(uri, AbcWriter.write(score).getBytes(StandardCharsets.UTF_8), "ABC");
                 break;
             default:
                 break;

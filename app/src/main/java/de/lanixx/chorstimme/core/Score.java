@@ -54,6 +54,10 @@ public class Score {
     public double tempoBpm = 100;   // quarter notes per minute
     public final List<Voice> voices = new ArrayList<>();
     public final List<String> warnings = new ArrayList<>();
+    /** bar lines (beats), if known; used for ABC export */
+    public final List<Double> barTimes = new ArrayList<>();
+    /** starts of the printed lines (beats), if known; used for ABC export */
+    public final List<Double> lineStarts = new ArrayList<>();
 
     public double end() {
         double e = 0;

@@ -14,7 +14,9 @@ dem Handy.
   Triolen, punktierte Rhythmen, Wiederholungen mit 1./2. Klammer, `w:`-Text).
 - **Tempo** 50–150 %, **Stimme hervorheben** („Alt betont“, „Nur Alt“), **Einzähler**.
 - **Abspielen** in der App, **MP3 speichern**, **MIDI speichern** (Chor-Klang, Text als
-  Lyrics-Events – z. B. in MuseScore lesbar).
+  Lyrics-Events – z. B. in MuseScore lesbar), **ABC speichern** (ABC-Notation mit Stimmen,
+  Takten, Tonart, Liedtext; direkt in abcjs/ABC-Editoren nutzbar). MIDI und ABC stehen sofort
+  nach dem Einlesen bereit.
 - Prüfung: Sind die Stimmen einer Zeile unterschiedlich lang, zeigt die App einen Hinweis.
 
 ## Grenzen
@@ -54,6 +56,7 @@ Bedarf selbst.
 | `core/AbcParser.java` | ABC-Notation |
 | `core/ChoirSynth.java` | Chorklang: additive Formant-Synthese, Vibrato, Hall |
 | `core/MidiWriter.java` | MIDI-Datei |
+| `core/AbcWriter.java` | ABC-Export (Tonart geschätzt, Takte/Zeilen wie erkannt, Triolen, w:-Text) |
 | `core/Mp3Encoder.java` + `cpp/` | MP3 über LAME (NDK/JNI) |
 | `tools/hosttest/` | Tests auf dem Rechner (Desktop-Java) |
 

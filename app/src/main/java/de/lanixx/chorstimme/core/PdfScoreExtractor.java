@@ -250,7 +250,10 @@ public final class PdfScoreExtractor {
                     lastEvent[gv] = e.rest ? null : e;
                 }
             }
+            score.lineStarts.add(t);
+            for (double bt : lt.bars) score.barTimes.add(t + bt);
             t += lt.length;
+            score.barTimes.add(t);          // a printed line ends with a bar line
         }
         if (!conflictLines.isEmpty()) {
             score.warnings.add("Zeile " + joinInts(conflictLines) + ": einzelne Notenwerte passten nicht zusammen und "
@@ -268,6 +271,7 @@ public final class PdfScoreExtractor {
     static final class LineTiming {
         double length;
         int conflicts;
+        final List<Double> bars = new ArrayList<>();   // bar line times inside the line
     }
 
     /**
@@ -428,6 +432,14 @@ public final class PdfScoreExtractor {
             }
         }
         lt.length = end;
+        // bar lines of the first staff -> times (start of the first column after the line)
+        if (!staffOf.isEmpty()) {
+            for (double bx : staffOf.get(0).barXs) {
+                double bt = end;
+                for (int j = 0; j < C; j++) if (cols.get(j) > bx) { bt = time[j]; break; }
+                if (bt > 1e-6 && bt < end - 1e-6 && (lt.bars.isEmpty() || bt > lt.bars.get(lt.bars.size() - 1) + 1e-6)) lt.bars.add(bt);
+            }
+        }
         return lt;
     }
 
@@ -1006,6 +1018,26 @@ public final class PdfScoreExtractor {
             for (double ly : st.lines) if (Math.abs(r.y0 - ly) < 0.3 * sp) hangs = true;
             restBeats.put(r, hangs ? -1 : 2);   // -1: whole-bar rest, resolved later
         }
+        // time signatures drawn as paths (abcjs): two digits stacked in the upper and lower half
+        // of the staff at the same x – not rests, also in the middle of a line (metre change)
+        java.util.Set<Shape> timeSig = new java.util.HashSet<>();
+        for (Shape a : others) {
+            if (!a.curved || a.glyph != 0) continue;
+            double ha = a.h() / sp;
+            if (ha < 1.6 || ha > 2.2) continue;
+            for (Shape b : others) {
+                if (b == a || !b.curved || b.glyph != 0) continue;
+                double hb = b.h() / sp;
+                if (hb < 1.6 || hb > 2.2 || Math.abs(a.cx() - b.cx()) > 0.5 * sp) continue;
+                boolean aTop = Math.abs(a.cy() - (st.lines[0] + st.lines[2]) / 2) < 0.4 * sp
+                        && Math.abs(b.cy() - (st.lines[2] + st.lines[4]) / 2) < 0.4 * sp;
+                if (aTop) {
+                    timeSig.add(a);
+                    timeSig.add(b);
+                }
+            }
+        }
+        others.removeAll(timeSig);
         List<Shape> keyAcc = new ArrayList<>();
         for (Shape s : others) {
             double w = s.w() / sp, h = s.h() / sp;

@@ -266,6 +266,10 @@ public final class AbcParser {
     private static VoiceState music(String line, VoiceState cur, Map<String, VoiceState> voices,
                                     int[] globalKey, double unit, String meter, Score score) {
         int i = 0, n = line.length();
+        if (voices.values().iterator().next() == cur
+                && (score.lineStarts.isEmpty() || cur.time > score.lineStarts.get(score.lineStarts.size() - 1) + 1e-6)) {
+            score.lineStarts.add(cur.time);
+        }
         cur.lyricLineStart = cur.toks.size();
         cur.lyricCursor = -1;
         double tupletFactor = 1;
@@ -347,6 +351,10 @@ public final class AbcParser {
                 if (bar.isEmpty() && c == '[') { i++; continue; }
                 cur.barAlter.clear();
                 if (!cur.toks.isEmpty()) cur.toks.get(cur.toks.size() - 1).barAfter = true;
+                if (voices.values().iterator().next() == cur && cur.time > 0
+                        && (score.barTimes.isEmpty() || cur.time > score.barTimes.get(score.barTimes.size() - 1) + 1e-6)) {
+                    score.barTimes.add(cur.time);
+                }
                 if (bar.startsWith(":")) repeatBack(cur);
                 if (bar.endsWith(":")) cur.repeatStart = cur.toks.size();
                 if (ending == 1) { cur.inEnding1 = true; cur.ending1Start = cur.toks.size(); }
