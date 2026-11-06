@@ -43,6 +43,9 @@ public final class PdfScoreExtractor {
         int voiceCount = 1;
         boolean glyphMode;               // notes come from a music font (Finale & Co.)
         char glyphClef;
+        final List<double[]> meters = new ArrayList<>();   // {x, beats per bar} from time signatures
+        List<Shape> pageShapes = new ArrayList<>();       // all shapes of the page (for bar lines)
+        List<Double> barXs = new ArrayList<>();
 
         double top() { return lines[0]; }
         double bottom() { return lines[4]; }
@@ -71,6 +74,8 @@ public final class PdfScoreExtractor {
         String syllable;
         boolean placeholder;   // lyric placeholder (melisma) assigned
         int[] midi;
+        int bar;               // bar index on the staff (bar lines left of it)
+        boolean barRest;       // whole-bar rest: length taken from the other voices / metre
     }
 
     // ------------------------------------------------------------ entry point
@@ -93,67 +98,121 @@ public final class PdfScoreExtractor {
         for (int p = 0; p < pages.size(); p++) assignToStaves(pages.get(p), p, staves);
         groupSystems(pages, staves);
 
-        // voice layout from the first system: from the labels ("Sopran", "Alt") if there are any,
-        // otherwise detected from the stems (two voices on a staff = stems up and down)
+        // voice layout: from the labels ("Sopran", "Alt") if the first system has any, otherwise
+        // detected from the stems over the whole piece (two voices = stems up and down)
         int sys0Staves = 0;
         for (Staff st : staves) if (st.system == 0) sys0Staves++;
         boolean anyLabels = false;
         for (Staff st : staves) if (st.system == 0 && !st.labels.isEmpty()) anyLabels = true;
-        List<String> names = new ArrayList<>();
         int[] voicesPerStaff = new int[sys0Staves];
-        Map<Staff, List<List<Event>>> firstRead = new HashMap<>();
+        List<String> labelNames = new ArrayList<>();
+        Map<Staff, List<List<Event>>> read = new HashMap<>();
+        if (anyLabels) {
+            for (Staff st : staves) {
+                if (st.system != 0) continue;
+                List<TextItem> lab = mergeLabels(st.labels);
+                voicesPerStaff[st.indexInSystem] = Math.max(1, Math.min(2, lab.size()));
+            }
+        } else {
+            for (Staff st : staves) {
+                if (st.indexInSystem >= sys0Staves) continue;
+                st.glyphMode = glyphMode;
+                st.voiceCount = 0;
+                List<List<Event>> evs = readStaff(st, new ArrayList<>(), st.system);
+                read.put(st, evs);
+                voicesPerStaff[st.indexInSystem] = Math.max(voicesPerStaff[st.indexInSystem],
+                        Math.min(2, evs.size()));
+            }
+        }
         for (Staff st : staves) {
             if (st.system != 0) continue;
-            st.glyphMode = glyphMode;
             List<TextItem> lab = mergeLabels(st.labels);
-            int n;
-            if (anyLabels) {
-                n = Math.max(1, Math.min(2, lab.size()));
-            } else {
-                st.voiceCount = 0;
-                List<List<Event>> evs = readStaff(st, score.warnings, 0);
-                firstRead.put(st, evs);
-                n = Math.max(1, Math.min(2, evs.size()));
+            for (int v = 0; v < voicesPerStaff[st.indexInSystem]; v++) {
+                labelNames.add(v < lab.size() ? lab.get(v).text : null);
             }
-            voicesPerStaff[st.indexInSystem] = n;
-            for (int v = 0; v < n; v++) names.add(v < lab.size() ? lab.get(v).text : null);
         }
+        int total = labelNames.size();
         if (!anyLabels) {
-            String[] satb = {"Sopran", "Alt", "Tenor", "Bass"};
-            String[] sa = {"Sopran", "Alt"};
-            String[] std = names.size() == 4 ? satb : names.size() == 2 ? sa : null;
-            for (int v = 0; v < names.size(); v++) names.set(v, std != null ? std[v] : "Stimme " + (v + 1));
+            String[] std = total == 4 ? new String[]{"Sopran", "Alt", "Tenor", "Bass"}
+                    : total == 2 ? new String[]{"Sopran", "Alt"} : null;
+            for (int v = 0; v < total; v++) labelNames.set(v, std != null ? std[v] : "Stimme " + (v + 1));
         }
-
         int[] offset = new int[sys0Staves];
-        int total = 0;
-        for (int i = 0; i < sys0Staves; i++) { offset[i] = total; total += voicesPerStaff[i]; }
+        int acc = 0;
+        for (int i = 0; i < sys0Staves; i++) { offset[i] = acc; acc += voicesPerStaff[i]; }
         for (int v = 0; v < total; v++) {
-            String n = names.get(v);
+            String n = labelNames.get(v);
             score.voices.add(new Score.Voice(n != null ? n : "Stimme " + (v + 1)));
         }
 
         double t = 0;
         int sysCount = 0;
         for (Staff st : staves) sysCount = Math.max(sysCount, st.system + 1);
-        List<List<Event>> carry = new ArrayList<>();   // last event per voice for ties over line ends
-        for (int v = 0; v < total; v++) carry.add(new ArrayList<>());
         Event[] lastEvent = new Event[total];
+        double[] meterOfStaff = new double[sys0Staves];   // beats per bar, carried over lines
+        boolean warnedExtra = false;
 
         for (int sys = 0; sys < sysCount; sys++) {
-            double sysEnd = t;
-            List<double[]> lens = new ArrayList<>();
+            // 1) read every staff of the line with the final voice count
+            List<Staff> line = new ArrayList<>();
+            Map<Staff, List<List<Event>>> evMap = new HashMap<>();
             for (Staff st : staves) {
                 if (st.system != sys) continue;
                 if (st.indexInSystem >= sys0Staves) {
-                    score.warnings.add("Zeile " + (sys + 1) + ": mehr Notensysteme als in der ersten Zeile – ignoriert.");
+                    if (!warnedExtra) score.warnings.add("Zeile " + (sys + 1) + ": mehr Notensysteme als in der ersten Zeile – ignoriert.");
+                    warnedExtra = true;
                     continue;
                 }
-                st.voiceCount = voicesPerStaff[st.indexInSystem];
-                st.glyphMode = glyphMode;
-                List<List<Event>> evs = firstRead.containsKey(st) ? firstRead.get(st) : readStaff(st, score.warnings, sys);
-                while (evs.size() < st.voiceCount) evs.add(new ArrayList<>());
-                for (int v = 0; v < evs.size() && v < voicesPerStaff[st.indexInSystem]; v++) {
+                int want = voicesPerStaff[st.indexInSystem];
+                List<List<Event>> evs = read.get(st);
+                if (evs == null || evs.size() != want) {
+                    st.voiceCount = want;
+                    st.glyphMode = glyphMode;
+                    evs = readStaff(st, score.warnings, sys);
+                } else if (st.system > 0 || anyLabels) {
+                    // keep auto-read result
+                }
+                while (evs.size() < want) evs.add(new ArrayList<>());
+                line.add(st);
+                evMap.put(st, evs);
+            }
+            // 2) whole-bar rests still open: length of that bar in the other voices of the line,
+            //    else from the time signature
+            for (Staff st : line) {
+                int idx = st.indexInSystem;
+                for (List<Event> list : evMap.get(st)) {
+                    for (Event e : list) {
+                        if (!(e.rest && e.barRest && e.dur == 0)) continue;
+                        double best = 0;
+                        for (Staff o : line) {
+                            for (List<Event> ol : evMap.get(o)) {
+                                if (ol == list) continue;
+                                double sum = 0;
+                                boolean onlyBarRests = true;
+                                for (Event x : ol) {
+                                    if (x.bar != e.bar) continue;
+                                    sum += x.dur;
+                                    if (!x.barRest) onlyBarRests = false;
+                                }
+                                if (!onlyBarRests) best = Math.max(best, sum);
+                            }
+                        }
+                        if (best <= 0) {
+                            double m = meterOfStaff[idx];
+                            for (double[] mt : st.meters) if (mt[0] < e.cx) m = mt[1];
+                            best = m > 0 ? m : 4;
+                        }
+                        e.dur = best;
+                    }
+                }
+                if (!st.meters.isEmpty()) meterOfStaff[idx] = st.meters.get(st.meters.size() - 1)[1];
+            }
+            // 3) timeline
+            double sysEnd = t;
+            List<double[]> lens = new ArrayList<>();
+            for (Staff st : line) {
+                List<List<Event>> evs = evMap.get(st);
+                for (int v = 0; v < voicesPerStaff[st.indexInSystem]; v++) {
                     int gv = offset[st.indexInSystem] + v;
                     Score.Voice voice = score.voices.get(gv);
                     double vt = t;
@@ -162,7 +221,7 @@ public final class PdfScoreExtractor {
                         Event e = list.get(i);
                         // tie from the end of the previous line
                         if (i == 0 && lastEvent[gv] != null && lastEvent[gv].tieToNext && !e.rest
-                                && samePitches(lastEvent[gv].midi, e.midi)) {
+                                && samePitches(lastEvent[gv].midi, e.midi) && !voice.notes.isEmpty()) {
                             Score.Note prev = voice.notes.get(voice.notes.size() - 1);
                             prev.duration += e.dur;
                             vt += e.dur;
@@ -177,7 +236,7 @@ public final class PdfScoreExtractor {
                         vt += e.dur;
                         lastEvent[gv] = e.rest ? null : e;
                     }
-                    lens.add(new double[]{gv, vt - t});
+                    if (!list.isEmpty()) lens.add(new double[]{gv, vt - t});
                     sysEnd = Math.max(sysEnd, vt);
                 }
             }
@@ -335,6 +394,7 @@ public final class PdfScoreExtractor {
         List<Staff> staves = new ArrayList<>();
         for (Staff s : all) if (s.page == page) staves.add(s);
         if (staves.isEmpty()) return;
+        for (Staff st : staves) st.pageShapes = pd.shapes;
         for (Shape s : pd.shapes) {
             Staff best = null;
             double bd = Double.MAX_VALUE;
@@ -357,7 +417,8 @@ public final class PdfScoreExtractor {
                 } else if (t.text.matches("[0-9]")) {
                     continue;   // tuplet numbers: handled below
                 } else if (t.x0 > st.x0 - 2 * st.sp && y > st.bottom() + 0.5 * st.sp
-                        && y < Math.min(nextTop - 0.3 * st.sp, st.bottom() + 12 * st.sp)) {
+                        && y < Math.min(nextTop - 2.5 * st.sp, st.bottom() + 12 * st.sp)
+                        && !DIRECTION.matcher(t.text).matches()) {
                     st.lyrics.add(t);
                 }
             }
@@ -468,6 +529,11 @@ public final class PdfScoreExtractor {
 
     // ------------------------------------------------------------ header
 
+    /** performance directions printed near the staves – not lyrics */
+    private static final Pattern DIRECTION = Pattern.compile(
+            "(?i)(rit|ritard|rall|accel|cresc|decresc|dim|tempo|poco|meno|piu|più|molto|sub|ten|"
+                    + "p|pp|ppp|mp|mf|f|ff|fff|sf|sfz|fp)\\.?");
+
     private static final Pattern TEMPO = Pattern.compile("=\\s*(\\d{2,3})");
 
     static void readHeader(PageData pd, Staff first, Score score) {
@@ -520,6 +586,7 @@ public final class PdfScoreExtractor {
         Shape clef = null;
 
         List<Shape> glyphAccs = new ArrayList<>();
+        List<Shape> meterDigits = new ArrayList<>();
         Map<Shape, Integer> glyphFlags = new HashMap<>();
         Map<Shape, Integer> restBeats = new HashMap<>();
         List<Shape> restGlyphs = new ArrayList<>();
@@ -553,6 +620,11 @@ public final class PdfScoreExtractor {
                     case '≈': restGlyphs.add(s); restBeats.put(s, 25); break;
                     case 'Ó': restGlyphs.add(s); restBeats.put(s, 2); break;
                     case '∑': restGlyphs.add(s); restBeats.put(s, -1); break;
+                    case 'c': st.meters.add(new double[]{s.x0, 4}); break;      // common time
+                    case 'C': st.meters.add(new double[]{s.x0, 4}); break;      // cut time 2/2
+                    case '1': case '2': case '3': case '4': case '5': case '6': case '7': case '8': case '9':
+                        meterDigits.add(s);
+                        break;
                     default:
                         break;
                 }
@@ -583,7 +655,12 @@ public final class PdfScoreExtractor {
                 continue;
             }
             if (!s.curved && w >= 1.2 && w <= 1.8 && h >= 0.45 && h <= 0.8) { rectRests.add(s); continue; }
-            if (!s.curved && w > 0.6 && h >= 0.35) { beams.add(s); continue; }
+            if (!s.curved && w > 0.6 && h >= 0.35) {
+                beams.add(s);
+                // Finale draws ties as polygons, not curves: also a tie candidate
+                if (h < 2.2 && w > 1.2 && s.fill && !s.stroke) curves.add(s);
+                continue;
+            }
             if (s.curved && w >= 0.3 && w <= 0.65 && h >= 0.3 && h <= 0.65) { dots.add(s); continue; }
             if (s.curved && h > 5.5 || s.curved && h > 2.5 && w > 2.2) {
                 if (clef == null || s.x0 < clef.x0) clef = s;
@@ -593,6 +670,14 @@ public final class PdfScoreExtractor {
         }
 
         identifyClef(st, clef, sh);
+        for (Shape a : meterDigits) {
+            for (Shape b : meterDigits) {
+                if (a == b || Math.abs(a.x0 - b.x0) > 0.6 * sp || a.cy() >= b.cy()) continue;
+                double num = a.glyph - '0', den = b.glyph - '0';
+                st.meters.add(new double[]{a.x0, num * 4 / den});
+            }
+        }
+        st.meters.sort(Comparator.comparingDouble(m -> m[0]));
         if (st.glyphClef != 0) {
             switch (st.glyphClef) {
                 case '?': st.clef = "bass"; st.bottomDiatonic = 18; break;
@@ -603,6 +688,15 @@ public final class PdfScoreExtractor {
             clef = null;
         }
 
+        // bar lines drawn through several staves belong to the shape list of only one of them
+        for (Shape b : st.pageShapes) {
+            if (barCand.contains(b) || b.glyph != 0) continue;
+            if (b.w() < 0.6 * sp && b.h() > 3.7 * sp && b.y0 <= st.top() + 0.3 * sp
+                    && b.y1 >= st.bottom() - 0.3 * sp && b.cx() > st.x0 + 0.5 * sp && b.cx() < st.x1 + sp
+                    && (b.fill || b.stroke)) {
+                barCand.add(b);
+            }
+        }
         // a full-height vertical touching a note head is a stem, otherwise a bar line
         for (Shape b : barCand) {
             boolean stem = false;
@@ -618,8 +712,9 @@ public final class PdfScoreExtractor {
             else bars.add(b.cx());
         }
 
-        // stems -> heads: an up stem leaves the right edge of the lowest chord note upwards,
-        // a down stem leaves the left edge of the highest note downwards
+        // stems -> heads. Normal: right edge on an up stem, left edge on a down stem.
+        // In chords with seconds a head sits on the other side: right of an up stem,
+        // left of a down stem. The head must lie on the stem's note end.
         for (Head hd : heads) {
             if (hd.kind == 4) continue;
             Shape best = null;
@@ -627,13 +722,20 @@ public final class PdfScoreExtractor {
             double bd = Double.MAX_VALUE;
             double cy = hd.s.cy();
             for (Shape s : stems) {
-                double dUp = Math.abs(s.x1 - hd.s.x1);
-                if (dUp < 0.2 * sp && cy <= s.y1 + 0.5 * sp && cy >= s.y0 + 0.5 * sp && dUp < bd) {
-                    bd = dUp; best = s; bestUp = true;
-                }
-                double dDown = Math.abs(s.x0 - hd.s.x0);
-                if (dDown < 0.2 * sp && cy >= s.y0 - 0.5 * sp && cy <= s.y1 - 0.5 * sp && dDown < bd) {
-                    bd = dDown; best = s; bestUp = false;
+                // the stem reaches well beyond the head on its free end (>= 1.5 spaces)
+                boolean upY = cy >= s.y0 + 1.5 * sp && cy <= s.y1 + 0.6 * sp;
+                boolean downY = cy >= s.y0 - 0.6 * sp && cy <= s.y1 - 1.5 * sp;
+                double[] cand = {
+                        upY ? Math.abs(s.x1 - hd.s.x1) : 1e9,                    // up, normal
+                        downY ? Math.abs(s.x0 - hd.s.x0) : 1e9,                  // down, normal
+                        upY ? Math.abs(hd.s.x0 - s.x1) + 0.1 * sp : 1e9,         // up, head right of stem
+                        downY ? Math.abs(hd.s.x1 - s.x0) + 0.1 * sp : 1e9};      // down, head left of stem
+                for (int k = 0; k < 4; k++) {
+                    if (cand[k] < 0.3 * sp && cand[k] < bd) {
+                        bd = cand[k];
+                        best = s;
+                        bestUp = k == 0 || k == 2;
+                    }
                 }
             }
             if (best != null) {
@@ -833,7 +935,17 @@ public final class PdfScoreExtractor {
                 if (a != b && a.heads.get(0).stemUp && !b.heads.get(0).stemUp
                         && Math.abs(a.heads.get(0).s.cx() - b.heads.get(0).s.cx()) < 0.6 * sp) both++;
             }
-            voices = both >= 2 ? 2 : 1;
+            // a single voice turns its stems by pitch; two voices keep voice 1 up and voice 2 down,
+            // so an up stem on a high note (or a down stem on a low one) means two voices
+            int contrary = 0;
+            for (Event a : events) {
+                Head h0 = a.heads.get(0);
+                int top = Integer.MIN_VALUE, low = Integer.MAX_VALUE;
+                for (Head h : a.heads) { top = Math.max(top, h.pos); low = Math.min(low, h.pos); }
+                if (h0.stemUp && low > 5) contrary++;
+                if (!h0.stemUp && top < 3) contrary++;
+            }
+            voices = both >= 1 || contrary >= 2 ? 2 : 1;
         }
 
         for (Event e : events) {
@@ -841,7 +953,7 @@ public final class PdfScoreExtractor {
             e.voice = voices == 2 ? (h0.stemUp ? 0 : 1) : 0;
             double base = h0.kind == 2 ? 2 : 1;
             Integer fl = flagCount.get(h0.stem);
-            int n = fl != null ? fl : countBeams(h0.stem, h0.stemUp, beams, sp);
+            int n = fl != null ? fl : countBeams(h0.stem, h0.stemUp, beams, stems, sp);
             if (h0.kind == 1 && n > 0) base = Math.pow(0.5, n);
             boolean dotted = false;
             for (Head hd : e.heads) dotted |= hd.dotted;
@@ -918,11 +1030,25 @@ public final class PdfScoreExtractor {
         }
         events.sort(Comparator.comparingDouble(e -> e.cx));
         double t0 = 0, t1 = 0;
+        List<Event> twins = new ArrayList<>();
         for (Event e : events) {
-            if (e.voice == -2) e.voice = t0 <= t1 ? 0 : 1;
-            if (e.dur < 0) e.dur = 4;   // whole-bar rest: assume 4 beats, fixed below
+            if (e.dur < 0) { e.barRest = true; e.dur = 0; }    // resolved later
+            if (e.voice == -2) {
+                if (e.barRest && voices == 2) {
+                    // one bar rest in the middle of a two-voice staff: both voices rest
+                    e.voice = 0;
+                    Event t = new Event();
+                    t.rest = true; t.barRest = true; t.voice = 1;
+                    t.x = e.x; t.cx = e.cx; t.cy = e.cy;
+                    twins.add(t);
+                } else {
+                    e.voice = t0 <= t1 ? 0 : 1;
+                }
+            }
             if (e.voice == 0) t0 += e.dur; else t1 += e.dur;
         }
+        events.addAll(twins);
+        events.sort(Comparator.comparingDouble(e -> e.cx));
 
         // tuplets: digit near the notes
         for (TextItem num : st.numbers) {
@@ -951,6 +1077,17 @@ public final class PdfScoreExtractor {
         for (int v = 0; v < nv; v++) perVoice.add(new ArrayList<>());
         for (Event e : events) perVoice.get(Math.min(e.voice, nv - 1)).add(e);
         bars.sort(Double::compare);
+        // lines in front of the first note/rest (system bracket, line start) don't divide bars
+        double firstEvent = Double.MAX_VALUE;
+        for (Event e : events) firstEvent = Math.min(firstEvent, e.x);
+        for (int i = bars.size() - 1; i >= 0; i--) {
+            if (bars.get(i) < firstEvent - 0.3 * sp) bars.remove(i);
+        }
+        for (int i = bars.size() - 1; i > 0; i--) {
+            if (bars.get(i) - bars.get(i - 1) < 1.2 * sp) bars.remove(i);   // double / final bar lines
+        }
+        st.barXs = bars;
+        for (Event e : events) e.bar = barIndex(bars, e.cx);
 
         // pitches with accidentals (bar-scoped)
         for (List<Event> list : perVoice) {
@@ -980,6 +1117,7 @@ public final class PdfScoreExtractor {
         }
 
         fixBarRests(perVoice, bars);
+        if (perVoice.size() == 2) shareRests(perVoice, sp);
 
         // ties
         for (Shape c : curves) {
@@ -1030,7 +1168,7 @@ public final class PdfScoreExtractor {
         return e;
     }
 
-    private static int countBeams(Shape stem, boolean up, List<Shape> beams, double sp) {
+    private static int countBeams(Shape stem, boolean up, List<Shape> beams, List<Shape> stems, double sp) {
         if (stem == null) return 0;
         double x = stem.cx();
         double tip = up ? stem.y0 : stem.y1;
@@ -1038,6 +1176,7 @@ public final class PdfScoreExtractor {
         for (Shape b : beams) {
             for (double[] r : b.subs) {
                 if (x < r[0] - 0.3 || x > r[2] + 0.3) continue;
+                if (r[2] - r[0] > 1.6 * sp && stemsUnder(r, stems) < 2) continue;   // hairpin, not a beam
                 double lo = up ? tip - 0.6 * sp : tip - 2.6 * sp;
                 double hi = up ? tip + 2.6 * sp : tip + 0.6 * sp;
                 if (r[3] >= lo && r[1] <= hi) n++;
@@ -1046,23 +1185,62 @@ public final class PdfScoreExtractor {
         return Math.min(n, 4);
     }
 
+    private static int stemsUnder(double[] r, List<Shape> stems) {
+        int n = 0;
+        for (Shape s : stems) {
+            boolean inX = s.cx() >= r[0] - 0.5 && s.cx() <= r[2] + 0.5;
+            boolean touches = s.y0 <= r[3] + 1 && s.y1 >= r[1] - 1;
+            if (inX && touches) n++;
+        }
+        return n;
+    }
+
     private static int barIndex(List<Double> bars, double x) {
         int i = 0;
         for (double b : bars) { if (b < x) i++; else break; }
         return i;
     }
 
+    /**
+     * Engravers often print one rest for both voices of a staff. If a voice is shorter in a bar
+     * and the other voice has a rest where this voice has nothing, the rest counts for both.
+     */
+    private static void shareRests(List<List<Event>> pv, double sp) {
+        for (int v = 0; v < 2; v++) {
+            List<Event> me = pv.get(v), other = pv.get(1 - v);
+            java.util.Set<Integer> barsSeen = new java.util.TreeSet<>();
+            for (Event e : other) barsSeen.add(e.bar);
+            for (int b : barsSeen) {
+                double mine = 0, theirs = 0;
+                for (Event e : me) if (e.bar == b) mine += e.dur;
+                for (Event e : other) if (e.bar == b) theirs += e.dur;
+                for (Event r : other) {
+                    if (mine >= theirs - 1e-6) break;
+                    if (r.bar != b || !r.rest || r.barRest) continue;
+                    boolean occupied = false;
+                    for (Event e : me) if (Math.abs(e.cx - r.cx) < 0.6 * sp) occupied = true;
+                    if (occupied || mine + r.dur > theirs + 1e-6) continue;
+                    Event c = new Event();
+                    c.rest = true; c.x = r.x; c.cx = r.cx; c.cy = r.cy; c.dur = r.dur; c.bar = b; c.voice = v;
+                    me.add(c);
+                    mine += r.dur;
+                }
+            }
+            me.sort(Comparator.comparingDouble(e -> e.cx));
+        }
+    }
+
     private static void fixBarRests(List<List<Event>> perVoice, List<Double> bars) {
         // a whole-bar rest gets the length of the same bar in another voice
         for (List<Event> list : perVoice) {
             for (Event e : list) {
-                if (!(e.rest && e.dur == 4)) continue;
-                int b = barIndex(bars, e.cx);
+                if (!(e.rest && e.barRest && e.dur == 0)) continue;
+                int b = e.bar;
                 double best = 0;
                 for (List<Event> other : perVoice) {
                     if (other == list) continue;
                     double sum = 0;
-                    for (Event o : other) if (barIndex(bars, o.cx) == b) sum += o.dur;
+                    for (Event o : other) if (o.bar == b) sum += o.dur;
                     best = Math.max(best, sum);
                 }
                 if (best > 0) e.dur = best;
