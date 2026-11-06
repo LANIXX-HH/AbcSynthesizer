@@ -36,6 +36,8 @@ public final class PdfReader {
         public boolean fill, stroke, curved;
         public int subpaths;
         public double lineWidth;
+        /** music-font character this shape stands for (0 = drawn path) */
+        public char glyph;
         /** bounding box per subpath: {x0, y0, x1, y1}, top-left origin */
         public final List<double[]> subs = new ArrayList<>();
 
@@ -61,11 +63,26 @@ public final class PdfReader {
         }
     }
 
+    /** One character of a music font (Finale Maestro, Sonata, Petrucci, ...): note heads, clefs... */
+    public static class Glyph {
+        public char c;
+        public double x0, x1, baseline, size;
+
+        @Override
+        public String toString() {
+            return String.format("<%s %.1f..%.1f,%.1f>", c, x0, x1, baseline);
+        }
+    }
+
     public static class PageData {
         public double width, height;
         public final List<Shape> shapes = new ArrayList<>();
         public final List<TextItem> texts = new ArrayList<>();
+        public final List<Glyph> glyphs = new ArrayList<>();
     }
+
+    private static final java.util.regex.Pattern MUSIC_FONT = java.util.regex.Pattern.compile(
+            "(?i).*(maestro|sonata|petrucci|opus|jazz|engraver|broadway|tamburo|november|bravura|leland|emmentaler|feta).*");
 
     private PdfReader() {}
 
@@ -83,7 +100,7 @@ public final class PdfReader {
                 pages.add(pd);
             }
             Stripper st = new Stripper(pages);
-            st.setSortByPosition(true);
+            st.setSortByPosition(false);   // we sort ourselves (PDFBox's sorter can throw too)
             st.getText(doc);
             for (PageData pd : pages) st.finish(pd);
         }
@@ -305,6 +322,20 @@ public final class PdfReader {
         @Override
         protected void processTextPosition(TextPosition text) {
             int p = getCurrentPageNo() - 1;
+            String font = text.getFont() != null ? text.getFont().getName() : null;
+            if (font != null && MUSIC_FONT.matcher(font).matches() && p >= 0 && p < pages.size()) {
+                String u = text.getUnicode();
+                if (u != null && !u.isEmpty()) {
+                    Glyph g = new Glyph();
+                    g.c = u.charAt(0);
+                    g.x0 = text.getXDirAdj();
+                    g.x1 = g.x0 + text.getWidthDirAdj();
+                    g.baseline = text.getYDirAdj();
+                    g.size = text.getFontSizeInPt();
+                    pages.get(p).glyphs.add(g);      // no de-duplication: unisons are two equal heads
+                }
+                return;
+            }
             // some PDFs (Chrome) draw every glyph twice: fill and outline
             String key = p + "|" + text.getUnicode() + "|" + Math.round(text.getXDirAdj() * 5)
                     + "|" + Math.round(text.getYDirAdj() * 5);
@@ -314,12 +345,24 @@ public final class PdfReader {
 
         void finish(PageData pd) {
             List<TextPosition> list = new ArrayList<>(chars.get(pages.indexOf(pd)));
-            // group into lines by baseline, then words by gaps/spaces
+            // group into lines by baseline, then words by gaps/spaces.
+            // (A comparator with a tolerance is not transitive and makes TimSort throw
+            // "Comparison method violates its general contract", so lines are numbered first.)
+            Collections.sort(list, (a, b) -> Double.compare(a.getYDirAdj(), b.getYDirAdj()));
+            java.util.Map<TextPosition, Integer> lineOf = new java.util.IdentityHashMap<>();
+            int line = -1;
+            double lineY = Double.NEGATIVE_INFINITY;
+            for (TextPosition tp : list) {
+                double fa = Math.max(tp.getFontSizeInPt(), 1);
+                if (tp.getYDirAdj() - lineY > 0.3 * fa) {
+                    line++;
+                    lineY = tp.getYDirAdj();
+                }
+                lineOf.put(tp, line);
+            }
             Collections.sort(list, (a, b) -> {
-                double fa = Math.max(a.getFontSizeInPt(), 1);
-                if (Math.abs(a.getYDirAdj() - b.getYDirAdj()) > 0.3 * fa)
-                    return Double.compare(a.getYDirAdj(), b.getYDirAdj());
-                return Double.compare(a.getXDirAdj(), b.getXDirAdj());
+                int c = Integer.compare(lineOf.get(a), lineOf.get(b));
+                return c != 0 ? c : Double.compare(a.getXDirAdj(), b.getXDirAdj());
             });
             TextItem cur = null;
             StringBuilder sb = new StringBuilder();

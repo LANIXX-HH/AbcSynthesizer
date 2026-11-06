@@ -19,8 +19,11 @@ dem Handy.
 
 ## Grenzen
 
-- PDFs: nur Notensatz von **abcjs** (Druck aus dem Browser). Gescannte Noten oder PDFs aus
-  Sibelius/MuseScore/LilyPond werden nicht erkannt.
+- PDFs: Notensatz von **abcjs** (Druck aus dem Browser) und von **Finale** mit Notenschrift
+  „Maestro“ (z. B. Noten von azbyka.ru). Gescannte Noten oder PDFs aus Sibelius/MuseScore/LilyPond
+  werden nicht erkannt.
+- Ohne Stimmnamen in der PDF werden die Stimmen aus den Notenhälsen erkannt und
+  Sopran/Alt/Tenor/Bass genannt (bei 4 Stimmen).
 - Wiederholungszeichen in PDFs werden erkannt, aber nicht ausgeschrieben (Hinweis erscheint).
   Mit ABC-Text werden Wiederholungen ausgeschrieben.
 - Kein echter Gesang mit Worten: Der Chor singt die Vokale (a, e, i, o, u) der Silben.

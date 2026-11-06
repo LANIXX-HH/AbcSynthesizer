@@ -41,6 +41,8 @@ public final class PdfScoreExtractor {
         int system;                       // index of the system (line of music)
         int indexInSystem;
         int voiceCount = 1;
+        boolean glyphMode;               // notes come from a music font (Finale & Co.)
+        char glyphClef;
 
         double top() { return lines[0]; }
         double bottom() { return lines[4]; }
@@ -75,6 +77,11 @@ public final class PdfScoreExtractor {
 
     public static Score extract(List<PageData> pages) {
         Score score = new Score();
+        boolean glyphMode = false;
+        for (PageData pd : pages) {
+            if (!pd.glyphs.isEmpty()) glyphMode = true;
+            glyphsToShapes(pd);
+        }
         mergeSplitStaves(pages);
         List<Staff> staves = new ArrayList<>();
         for (int p = 0; p < pages.size(); p++) staves.addAll(findStaves(pages.get(p), p));
@@ -86,22 +93,38 @@ public final class PdfScoreExtractor {
         for (int p = 0; p < pages.size(); p++) assignToStaves(pages.get(p), p, staves);
         groupSystems(pages, staves);
 
-        // voice layout from the first system
+        // voice layout from the first system: from the labels ("Sopran", "Alt") if there are any,
+        // otherwise detected from the stems (two voices on a staff = stems up and down)
         int sys0Staves = 0;
         for (Staff st : staves) if (st.system == 0) sys0Staves++;
+        boolean anyLabels = false;
+        for (Staff st : staves) if (st.system == 0 && !st.labels.isEmpty()) anyLabels = true;
         List<String> names = new ArrayList<>();
         int[] voicesPerStaff = new int[sys0Staves];
+        Map<Staff, List<List<Event>>> firstRead = new HashMap<>();
         for (Staff st : staves) {
             if (st.system != 0) continue;
+            st.glyphMode = glyphMode;
             List<TextItem> lab = mergeLabels(st.labels);
-            int n = Math.max(1, Math.min(2, lab.size()));
-            voicesPerStaff[st.indexInSystem] = n;
-            for (int v = 0; v < n; v++) {
-                names.add(v < lab.size() ? lab.get(v).text : null);
+            int n;
+            if (anyLabels) {
+                n = Math.max(1, Math.min(2, lab.size()));
+            } else {
+                st.voiceCount = 0;
+                List<List<Event>> evs = readStaff(st, score.warnings, 0);
+                firstRead.put(st, evs);
+                n = Math.max(1, Math.min(2, evs.size()));
             }
+            voicesPerStaff[st.indexInSystem] = n;
+            for (int v = 0; v < n; v++) names.add(v < lab.size() ? lab.get(v).text : null);
+        }
+        if (!anyLabels) {
+            String[] satb = {"Sopran", "Alt", "Tenor", "Bass"};
+            String[] sa = {"Sopran", "Alt"};
+            String[] std = names.size() == 4 ? satb : names.size() == 2 ? sa : null;
+            for (int v = 0; v < names.size(); v++) names.set(v, std != null ? std[v] : "Stimme " + (v + 1));
         }
 
-        // global voice index = offset of staff + voice on staff
         int[] offset = new int[sys0Staves];
         int total = 0;
         for (int i = 0; i < sys0Staves; i++) { offset[i] = total; total += voicesPerStaff[i]; }
@@ -109,10 +132,6 @@ public final class PdfScoreExtractor {
             String n = names.get(v);
             score.voices.add(new Score.Voice(n != null ? n : "Stimme " + (v + 1)));
         }
-
-        // auto-detect two voices on a staff when the first system has no labels
-        boolean anyLabels = false;
-        for (String n : names) if (n != null) anyLabels = true;
 
         double t = 0;
         int sysCount = 0;
@@ -131,17 +150,9 @@ public final class PdfScoreExtractor {
                     continue;
                 }
                 st.voiceCount = voicesPerStaff[st.indexInSystem];
-                if (!anyLabels) st.voiceCount = 0;    // 0 = decide automatically
-                List<List<Event>> evs = readStaff(st, score.warnings, sys);
-                if (!anyLabels && evs.size() > voicesPerStaff[st.indexInSystem]) {
-                    // auto-detected a second voice: only possible if layout allows
-                    if (sys == 0) {
-                        score.warnings.add("Zweite Stimme im System erkannt, aber ohne Stimmnamen – als eine Stimme gelesen.");
-                    }
-                    List<Event> merged = new ArrayList<>(evs.get(0));
-                    evs = new ArrayList<>();
-                    evs.add(merged);
-                }
+                st.glyphMode = glyphMode;
+                List<List<Event>> evs = firstRead.containsKey(st) ? firstRead.get(st) : readStaff(st, score.warnings, sys);
+                while (evs.size() < st.voiceCount) evs.add(new ArrayList<>());
                 for (int v = 0; v < evs.size() && v < voicesPerStaff[st.indexInSystem]; v++) {
                     int gv = offset[st.indexInSystem] + v;
                     Score.Voice voice = score.voices.get(gv);
@@ -402,11 +413,44 @@ public final class PdfScoreExtractor {
         return true;
     }
 
+    /** Music-font characters become shapes centred on their baseline (= staff position). */
+    static void glyphsToShapes(PageData pd) {
+        for (PdfReader.Glyph g : pd.glyphs) {
+            double half = Math.max(g.size, 4) * 0.125;     // half a staff space
+            Shape s = new Shape();
+            s.glyph = g.c;
+            s.fill = true;
+            s.curved = true;
+            s.subpaths = 1;
+            s.x0 = g.x0;
+            s.x1 = Math.max(g.x1, g.x0 + 0.5);
+            s.y0 = g.baseline - half;
+            s.y1 = g.baseline + half;
+            pd.shapes.add(s);
+        }
+        pd.glyphs.clear();
+    }
+
+    /** Reading order: lines by baseline (1 pt tolerance), left to right inside a line. */
+    private static void sortByLine(List<TextItem> items) {
+        items.sort(Comparator.comparingDouble(t -> t.baseline));
+        Map<TextItem, Integer> lineOf = new java.util.IdentityHashMap<>();
+        int line = -1;
+        double y = Double.NEGATIVE_INFINITY;
+        for (TextItem t : items) {
+            if (t.baseline - y > 1) { line++; y = t.baseline; }
+            lineOf.put(t, line);
+        }
+        items.sort((a, b) -> {
+            int c = Integer.compare(lineOf.get(a), lineOf.get(b));
+            return c != 0 ? c : Double.compare(a.x0, b.x0);
+        });
+    }
+
     private static List<TextItem> mergeLabels(List<TextItem> labels) {
         // words on the same baseline form one label ("Sopran 1")
         List<TextItem> sorted = new ArrayList<>(labels);
-        sorted.sort((a, b) -> Math.abs(a.baseline - b.baseline) < 1 ? Double.compare(a.x0, b.x0)
-                : Double.compare(a.baseline, b.baseline));
+        sortByLine(sorted);
         List<TextItem> out = new ArrayList<>();
         for (TextItem t : sorted) {
             TextItem last = out.isEmpty() ? null : out.get(out.size() - 1);
@@ -452,8 +496,7 @@ public final class PdfScoreExtractor {
         for (TextItem t : pd.texts) {
             if (t.baseline < first.top() && t.baseline > first.top() - 12 * first.sp) above.add(t);
         }
-        above.sort((a, b) -> Math.abs(a.baseline - b.baseline) < 1 ? Double.compare(a.x0, b.x0)
-                : Double.compare(a.baseline, b.baseline));
+        sortByLine(above);
         StringBuilder line = new StringBuilder();
         for (TextItem t : above) line.append(t.text).append(' ');
         Matcher m = TEMPO.matcher(line);
@@ -476,8 +519,47 @@ public final class PdfScoreExtractor {
         List<Shape> barCand = new ArrayList<>();
         Shape clef = null;
 
+        List<Shape> glyphAccs = new ArrayList<>();
+        Map<Shape, Integer> glyphFlags = new HashMap<>();
+        Map<Shape, Integer> restBeats = new HashMap<>();
+        List<Shape> restGlyphs = new ArrayList<>();
         for (Shape s : sh) {
-            if (!s.fill) continue;
+            if (s.glyph != 0) {
+                switch (s.glyph) {
+                    case 'œ': case '˙': case 'w': {
+                        Head hd = new Head();
+                        hd.s = s;
+                        hd.kind = s.glyph == 'œ' ? 1 : s.glyph == '˙' ? 2 : 4;
+                        heads.add(hd);
+                        break;
+                    }
+                    case '&': case '?': case 'B': case 'V':
+                        if (st.glyphClef == 0) st.glyphClef = s.glyph;
+                        break;
+                    case '#': case 'b': case 'n':
+                        glyphAccs.add(s);
+                        break;
+                    case '.': case 'k':
+                        dots.add(s);
+                        break;
+                    case 'j': case 'J':
+                        glyphFlags.put(s, 1);
+                        break;
+                    case 'r': case 'R':
+                        glyphFlags.put(s, 2);
+                        break;
+                    case 'Œ': restGlyphs.add(s); restBeats.put(s, 100); break;
+                    case '‰': restGlyphs.add(s); restBeats.put(s, 50); break;
+                    case '≈': restGlyphs.add(s); restBeats.put(s, 25); break;
+                    case 'Ó': restGlyphs.add(s); restBeats.put(s, 2); break;
+                    case '∑': restGlyphs.add(s); restBeats.put(s, -1); break;
+                    default:
+                        break;
+                }
+                continue;
+            }
+            boolean lineLike = s.stroke && (s.w() < 0.3 * sp || s.h() < 0.15 * sp);
+            if (!s.fill && !lineLike) continue;
             double w = s.w() / sp, h = s.h() / sp;
             if (h < 0.15 && w > 15) continue;                       // staff line
             if (w < 0.6 && h > 3.7 && s.y0 <= st.top() + 0.3 * sp && s.y1 >= st.bottom() - 0.3 * sp) {
@@ -511,6 +593,15 @@ public final class PdfScoreExtractor {
         }
 
         identifyClef(st, clef, sh);
+        if (st.glyphClef != 0) {
+            switch (st.glyphClef) {
+                case '?': st.clef = "bass"; st.bottomDiatonic = 18; break;
+                case 'V': st.clef = "treble-8"; st.bottomDiatonic = 23; break;
+                case 'B': st.clef = "alto"; st.bottomDiatonic = 24; break;
+                default: st.clef = "treble"; st.bottomDiatonic = 30; break;
+            }
+            clef = null;
+        }
 
         // a full-height vertical touching a note head is a stem, otherwise a bar line
         for (Shape b : barCand) {
@@ -551,8 +642,34 @@ public final class PdfScoreExtractor {
             }
         }
 
+        // two equal heads at one place (unison of two voices): one per stem direction
+        for (int i = 0; i < heads.size(); i++) {
+            for (int j = i + 1; j < heads.size(); j++) {
+                Head a = heads.get(i), b = heads.get(j);
+                if (a.stem == null || a.stem != b.stem) continue;
+                if (Math.abs(a.s.x0 - b.s.x0) > 0.3 * sp || Math.abs(a.s.cy() - b.s.cy()) > 0.3 * sp) continue;
+                for (Shape stm : stems) {
+                    if (stm == a.stem) continue;
+                    double cy = b.s.cy();
+                    boolean up = Math.abs(stm.x1 - b.s.x1) < 0.2 * sp && cy <= stm.y1 + 0.5 * sp && cy >= stm.y0 + 0.5 * sp;
+                    boolean down = Math.abs(stm.x0 - b.s.x0) < 0.2 * sp && cy >= stm.y0 - 0.5 * sp && cy <= stm.y1 - 0.5 * sp;
+                    if (up || down) { b.stem = stm; b.stemUp = up; break; }
+                }
+            }
+        }
+
         // flags (attached to a stem tip)
         Map<Shape, Integer> flagCount = new HashMap<>();
+        for (Map.Entry<Shape, Integer> fe : glyphFlags.entrySet()) {
+            Shape f = fe.getKey();
+            Shape best = null;
+            double bd = Double.MAX_VALUE;
+            for (Shape stm : stems) {
+                double d = Math.abs(stm.cx() - f.x0) + Math.min(Math.abs(stm.y0 - f.cy()), Math.abs(stm.y1 - f.cy()));
+                if (Math.abs(stm.cx() - f.x0) < 0.6 * sp && d < bd) { bd = d; best = stm; }
+            }
+            if (best != null) flagCount.put(best, fe.getValue());
+        }
         List<Shape> rest = new ArrayList<>();
         for (Shape s : others) {
             double w = s.w() / sp, h = s.h() / sp;
@@ -583,8 +700,7 @@ public final class PdfScoreExtractor {
         for (Shape r : rectRests) firstX = Math.min(firstX, r.x0);
 
         // accidentals and quarter / eighth rests among the remaining shapes
-        List<Shape> restGlyphs = new ArrayList<>(rectRests);
-        Map<Shape, Integer> restBeats = new HashMap<>();
+        restGlyphs.addAll(rectRests);
         for (Shape r : rectRests) {
             // whole rest hangs from a line, half rest sits on a line
             boolean hangs = false;
@@ -619,6 +735,23 @@ public final class PdfScoreExtractor {
         }
         // rect rests in the first column belong to the music too
         for (Shape r : rectRests) restBeats.putIfAbsent(r, 2);
+
+        for (Shape a : glyphAccs) {
+            int type = a.glyph == '#' ? 1 : a.glyph == 'b' ? -1 : 2;
+            int pos = (int) Math.round((st.bottom() - a.cy()) / (sp / 2));
+            if (a.x1 < firstX - 0.2 * sp) {
+                if (type != 2) st.keySig.put(Math.floorMod(st.bottomDiatonic + pos, 7), type);
+                continue;
+            }
+            Head best = null;
+            double bd = Double.MAX_VALUE;
+            for (Head hd : heads) {
+                double dx = hd.s.x0 - a.x1;
+                if (dx < -0.2 * sp || dx > 2.5 * sp || hd.pos != pos) continue;
+                if (dx < bd) { bd = dx; best = hd; }
+            }
+            if (best != null) best.alter = type;
+        }
 
         // key signature
         for (Shape a : keyAcc) {
@@ -793,6 +926,7 @@ public final class PdfScoreExtractor {
 
         // tuplets: digit near the notes
         for (TextItem num : st.numbers) {
+            if (num.x0 < st.x0 + 4 * sp) continue;     // bar number at the start of a line
             int n = Integer.parseInt(num.text);
             double factor = n == 3 ? 2.0 / 3 : n == 2 ? 1.5 : n == 4 ? 0.75 : n == 6 ? 2.0 / 3 : n == 5 ? 0.8 : 1;
             if (factor == 1) continue;
@@ -1010,7 +1144,8 @@ public final class PdfScoreExtractor {
             TextItem t = syl.get(i - 1);
             double c = (t.x0 + t.x1) / 2;
             for (int j = 1; j <= N; j++) {
-                double use = dp[i - 1][j - 1] + Math.abs(c - notes.get(j - 1).x);
+                Event ne = notes.get(j - 1);
+                double use = dp[i - 1][j - 1] + Math.abs(c - (st.glyphMode ? ne.cx : ne.x));
                 double skipNote = dp[i][j - 1];
                 double skipSyl = dp[i - 1][j] + drop;
                 if (use <= skipNote && use <= skipSyl) { dp[i][j] = use; move[i][j] = 1; }
