@@ -1,0 +1,56 @@
+# Chorstimme
+
+Android-App: Noten-PDF (aus abcjs gedruckt) oder ABC-Notation laden → Übungsaufnahme als
+MP3 (synthetischer Chor, singt die Vokale des Textes) und MIDI-Datei. Alles läuft offline auf
+dem Handy.
+
+## Funktionen
+
+- **PDF öffnen** – liest die Vektorgrafik der PDF (Notenköpfe, Hälse, Fähnchen, Balken,
+  Punkte, Pausen, Vorzeichen, Haltebögen, Triolen, Schlüssel, Liedtext) und baut daraus die Noten.
+  Mehrere Stimmen pro System (Sopran/Alt auf einem System) und mehrere Systeme pro Zeile
+  (SATB) werden unterstützt.
+- **ABC-Datei / ABC-Text** – direkter Import der ABC-Notation (Stimmen, Vorzeichen, Bögen,
+  Triolen, punktierte Rhythmen, Wiederholungen mit 1./2. Klammer, `w:`-Text).
+- **Tempo** 50–150 %, **Stimme hervorheben** („Alt betont“, „Nur Alt“), **Einzähler**.
+- **Abspielen** in der App, **MP3 speichern**, **MIDI speichern** (Chor-Klang, Text als
+  Lyrics-Events – z. B. in MuseScore lesbar).
+- Prüfung: Sind die Stimmen einer Zeile unterschiedlich lang, zeigt die App einen Hinweis.
+
+## Grenzen
+
+- PDFs: nur Notensatz von **abcjs** (Druck aus dem Browser). Gescannte Noten oder PDFs aus
+  Sibelius/MuseScore/LilyPond werden nicht erkannt.
+- Wiederholungszeichen in PDFs werden erkannt, aber nicht ausgeschrieben (Hinweis erscheint).
+  Mit ABC-Text werden Wiederholungen ausgeschrieben.
+- Kein echter Gesang mit Worten: Der Chor singt die Vokale (a, e, i, o, u) der Silben.
+
+## APK bauen
+
+**GitHub Actions (ohne lokale Installation):** Repository auf GitHub anlegen, dieses Projekt
+pushen. Der Workflow „APK bauen“ läuft automatisch; unter *Actions → letzter Lauf →
+Artifacts* liegt `Chorstimme-APK` (ZIP mit der APK). APK aufs Handy, Installation aus
+unbekannten Quellen erlauben, installieren.
+
+Die APK ist mit einem festen Schlüssel aus dem Repository signiert (`app/chorstimme.keystore`): direkt installierbar, neue Versionen lassen sich darüber installieren. Für den Play Store einen eigenen, geheimen Schlüssel verwenden.
+
+**Android Studio:** Projektordner öffnen, „Run“. NDK und CMake installiert Android Studio bei
+Bedarf selbst.
+
+## Aufbau
+
+| Pfad | Inhalt |
+|---|---|
+| `app/src/main/java/.../MainActivity.java` | Oberfläche |
+| `core/PdfReader.java` | PDF-Vektorpfade und Text auslesen (PdfBox-Android) |
+| `core/PdfScoreExtractor.java` | Notenerkennung aus den Vektorformen (relativ zum Linienabstand) |
+| `core/AbcParser.java` | ABC-Notation |
+| `core/ChoirSynth.java` | Chorklang: additive Formant-Synthese, Vibrato, Hall |
+| `core/MidiWriter.java` | MIDI-Datei |
+| `core/Mp3Encoder.java` + `cpp/` | MP3 über LAME (NDK/JNI) |
+| `tools/hosttest/` | Tests auf dem Rechner (Desktop-Java) |
+
+## Lizenzen
+
+- LAME 3.99.5 (`app/src/main/cpp/lame`) – LGPL 2, siehe `COPYING` dort.
+- PdfBox-Android – Apache License 2.0.

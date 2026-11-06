@@ -1,0 +1,15 @@
+X:5
+T:Rhythmus und Stimmen
+L:1/8
+Q:1/4=72
+M:4/4
+%%score (S A)
+K:Bb
+V:S clef=treble name="Sopran"
+V:A clef=treble name="Alt"
+[V:S] B2 z B c/d/ z/ e/ f2 | g4- g2 z2 | f>e d/c/B/A/ B4- |
+w: Lob, Lob dem Her-ren al-le Welt, ja Welt
+[V:A] F2 z F A2 z A | B4 z2 G2 | F3 z/ F/ F2 E2 |
+[V:S] B2 [DF]2 z4 | z2 d2 c3 z | B8 |]
+w: Welt A-men so
+[V:A] D4 z4 | z2 B2 A2 G2 | D8 |]

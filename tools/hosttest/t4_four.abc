@@ -1,0 +1,19 @@
+X:4
+T:Vier Systeme
+L:1/8
+Q:1/4=100
+M:3/4
+%%score S A T B
+K:Dm
+V:S clef=treble name="Sopran"
+V:A clef=treble name="Alt"
+V:T clef=treble-8 name="Tenor"
+V:B clef=bass name="Bass"
+[V:S] d2 e2 f2 | a4 g2 | f6 |]
+w: Ky-ri-e e-lei-son
+[V:A] A2 ^c2 d2 | e4 e2 | d6 |]
+w: Ky-ri-e e-lei-son
+[V:T] F2 G2 A2 | c4 B2 | A6 |]
+w: Ky-ri-e e-lei-son
+[V:B] D,2 A,,2 D,2 | C,4 C,2 | D,6 |]
+w: Ky-ri-e e-lei-son
