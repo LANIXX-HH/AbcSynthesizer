@@ -21,8 +21,9 @@ dem Handy.
 
 ## Grenzen
 
-- PDFs: Notensatz von **abcjs** (Druck aus dem Browser) und von **Finale** mit Notenschrift
-  „Maestro“ (z. B. Noten von azbyka.ru). Gescannte Noten oder PDFs aus Sibelius/MuseScore/LilyPond
+- PDFs: Notensatz von **abcjs** (Druck aus dem Browser), **Finale** mit Notenschrift
+  „Maestro“ (z. B. Noten von azbyka.ru) und ältere PDFs, deren Notenzeichen als kleine
+  Bitmaps (Type3-Schriften, Acrobat Distiller) gespeichert sind. Gescannte Noten oder PDFs aus Sibelius/MuseScore/LilyPond
   werden nicht erkannt.
 - Ohne Stimmnamen in der PDF werden die Stimmen aus den Notenhälsen erkannt und
   Sopran/Alt/Tenor/Bass genannt (bei 4 Stimmen).

@@ -12,6 +12,14 @@ import com.tom_roush.pdfbox.pdmodel.PDResources;
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle;
 import com.tom_roush.pdfbox.pdmodel.graphics.PDXObject;
 import com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject;
+import com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import com.tom_roush.pdfbox.pdmodel.graphics.image.PDInlineImage;
+import com.tom_roush.pdfbox.pdmodel.font.PDFont;
+import com.tom_roush.pdfbox.pdmodel.font.PDType3CharProc;
+import com.tom_roush.pdfbox.pdmodel.font.PDType3Font;
+import com.tom_roush.pdfbox.cos.COSArray;
+import com.tom_roush.pdfbox.cos.COSDictionary;
+import com.tom_roush.pdfbox.cos.COSString;
 import com.tom_roush.pdfbox.text.PDFTextStripper;
 import com.tom_roush.pdfbox.text.TextPosition;
 
@@ -38,6 +46,8 @@ public final class PdfReader {
         public double lineWidth;
         /** music-font character this shape stands for (0 = drawn path) */
         public char glyph;
+        /** for bitmaps: share of inked pixels (-1 = vector path, unknown) */
+        public double ink = -1;
         /** bounding box per subpath: {x0, y0, x1, y1}, top-left origin */
         public final List<double[]> subs = new ArrayList<>();
 
@@ -85,6 +95,38 @@ public final class PdfReader {
             "(?i).*(maestro|sonata|petrucci|opus|jazz|engraver|broadway|tamburo|november|bravura|leland|emmentaler|feta).*");
 
     private PdfReader() {}
+
+    /**
+     * Type3 fonts without a Unicode table are drawings (music symbols as small pictures, e.g.
+     * from old notation programs). Type3 fonts with a Unicode table are ordinary text (Chrome
+     * writes lyrics like that) and stay text.
+     */
+    static boolean isSymbolType3(PDFont f) {
+        return f instanceof PDType3Font
+                && !f.getCOSObject().containsKey(COSName.TO_UNICODE);
+    }
+
+    /**
+     * Old PDFs often have Cyrillic fonts without a Unicode table; the text then comes out as
+     * Latin-1 letters (Ìèðî instead of Миро). Mostly À..ÿ means Windows-1251 bytes.
+     */
+    static String fixCyrillic(String s) {
+        int hi = 0, letters = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isLetter(c)) letters++;
+            if (c >= 0xC0 && c <= 0xFF) hi++;
+            if (c > 0xFF) return s;               // already real Unicode
+        }
+        if (letters == 0 || hi * 2 < letters) return s;
+        byte[] b = new byte[s.length()];
+        for (int i = 0; i < s.length(); i++) b[i] = (byte) s.charAt(i);
+        try {
+            return new String(b, "windows-1251");
+        } catch (java.io.UnsupportedEncodingException e) {
+            return s;
+        }
+    }
 
     public static List<PageData> read(InputStream in) throws IOException {
         List<PageData> pages = new ArrayList<>();
@@ -153,6 +195,11 @@ public final class PdfReader {
             double lineWidth = 1;
             List<Double> ops = new ArrayList<>();
             List<COSBase> rawOps = new ArrayList<>();
+
+            // text state (only Type3 fonts are drawn here: their glyphs are small drawings/bitmaps)
+            Matrix tm = Matrix.identity(), tlm = Matrix.identity();
+            PDFont font = null;
+            double fontSize = 0, charSpacing = 0, wordSpacing = 0, hScale = 1, leading = 0, rise = 0;
 
             // current path
             double[] bb = null;
@@ -279,15 +326,169 @@ public final class PdfReader {
                                         fm.getScaleY(), fm.getTranslateX(), fm.getTranslateY());
                                 PDResources fr = form.getResources() != null ? form.getResources() : res;
                                 run(form, fr, m.then(ctm), depth + 1);
+                            } else if (x instanceof PDImageXObject) {
+                                PDImageXObject img = (PDImageXObject) x;
+                                try {
+                                    boolean bilevel = img.isStencil() || img.getBitsPerComponent() == 1;
+                                    addImage(img.getWidth(), img.getHeight(), bilevel,
+                                            bilevel ? img.createInputStream() : null, ctm);
+                                } catch (Exception e) {
+                                    addImage(1, 1, false, null, ctm);
+                                }
                             }
                         }
                         break;
+                    case "BI": {
+                        Operator bi = (Operator) t;
+                        try {
+                            PDInlineImage img = new PDInlineImage(bi.getImageParameters(), bi.getImageData(), res);
+                            addImage(img.getWidth(), img.getHeight(), img.isStencil() || img.getBitsPerComponent() == 1,
+                                    img.createInputStream(), ctm);
+                        } catch (Exception ignored) {
+                            addImage(1, 1, false, null, ctm);
+                        }
+                        break;
+                    }
+                    case "BT":
+                        tm = Matrix.identity();
+                        tlm = Matrix.identity();
+                        break;
+                    case "Tf":
+                        if (!rawOps.isEmpty() && rawOps.get(0) instanceof COSName && o.length >= 1 && res != null) {
+                            try {
+                                font = res.getFont((COSName) rawOps.get(0));
+                            } catch (Exception e) {
+                                font = null;
+                            }
+                            fontSize = o[o.length - 1];
+                        }
+                        break;
+                    case "Tc": if (o.length == 1) charSpacing = o[0]; break;
+                    case "Tw": if (o.length == 1) wordSpacing = o[0]; break;
+                    case "Tz": if (o.length == 1) hScale = o[0] / 100; break;
+                    case "TL": if (o.length == 1) leading = o[0]; break;
+                    case "Ts": if (o.length == 1) rise = o[0]; break;
+                    case "Tm":
+                        if (o.length == 6) {
+                            tlm = new Matrix(o[0], o[1], o[2], o[3], o[4], o[5]);
+                            tm = tlm;
+                        }
+                        break;
+                    case "Td":
+                    case "TD":
+                        if (o.length == 2) {
+                            if (op.equals("TD")) leading = -o[1];
+                            tlm = new Matrix(1, 0, 0, 1, o[0], o[1]).then(tlm);
+                            tm = tlm;
+                        }
+                        break;
+                    case "T*":
+                        tlm = new Matrix(1, 0, 0, 1, 0, -leading).then(tlm);
+                        tm = tlm;
+                        break;
+                    case "Tj":
+                    case "'":
+                    case "\"":
+                    case "TJ": {
+                        if (op.equals("'") || op.equals("\"")) {
+                            if (op.equals("\"") && o.length >= 2) { wordSpacing = o[0]; charSpacing = o[1]; }
+                            tlm = new Matrix(1, 0, 0, 1, 0, -leading).then(tlm);
+                            tm = tlm;
+                        }
+                        if (!isSymbolType3(font)) break;     // real text: read by the text stripper
+                        List<Object> parts = new ArrayList<>();
+                        for (COSBase b : rawOps) {
+                            if (b instanceof COSString) parts.add(b);
+                            else if (b instanceof COSArray) for (COSBase x : (COSArray) b) parts.add(x);
+                        }
+                        for (Object part : parts) {
+                            if (part instanceof COSNumber) {
+                                double adj = -((COSNumber) part).floatValue() / 1000.0 * fontSize * hScale;
+                                tm = new Matrix(1, 0, 0, 1, adj, 0).then(tm);
+                            } else if (part instanceof COSString) {
+                                tm = showType3((PDType3Font) font, ((COSString) part).getBytes(), tm, ctm,
+                                        fontSize, charSpacing, wordSpacing, hScale, rise, depth);
+                            }
+                        }
+                        break;
+                    }
                     default:
                         break;
                 }
                 ops.clear();
                 rawOps.clear();
             }
+        }
+
+        /** Draws the glyphs of a Type3 string (each glyph is a small content stream). */
+        private Matrix showType3(PDType3Font font, byte[] bytes, Matrix tm, Matrix ctm, double fontSize,
+                                 double charSpacing, double wordSpacing, double hScale, double rise, int depth) throws IOException {
+            com.tom_roush.pdfbox.util.Matrix fm = font.getFontMatrix();
+            Matrix fontMatrix = new Matrix(fm.getScaleX(), fm.getShearY(), fm.getShearX(), fm.getScaleY(),
+                    fm.getTranslateX(), fm.getTranslateY());
+            java.io.InputStream in = new java.io.ByteArrayInputStream(bytes);
+            PDResources fr = font.getResources();
+            while (in.available() > 0) {
+                int code = font.readCode(in);
+                Matrix trm = new Matrix(fontSize * hScale, 0, 0, fontSize, 0, rise).then(tm);
+                PDType3CharProc proc = font.getCharProc(code);
+                if (proc != null) run(proc, fr != null ? fr : new PDResources(), fontMatrix.then(trm).then(ctm), depth + 1);
+                double w = font.getDisplacement(code).getX();
+                double tx = (w * fontSize + charSpacing + (code == 32 ? wordSpacing : 0)) * hScale;
+                tm = new Matrix(1, 0, 0, 1, tx, 0).then(tm);
+            }
+            return tm;
+        }
+
+        /**
+         * An image is drawn into the unit square of the CTM. Bitmaps of 1 bit (glyphs and rules
+         * of older PDF printers) become shapes like drawn paths; a white centre marks a hollow
+         * glyph (half/whole note head, sharp, natural) like a path with a hole.
+         */
+        private void addImage(int w, int h, boolean bilevel, java.io.InputStream data, Matrix ctm) {
+            double[] b = add(null, ctm, 0, 0);
+            add(b, ctm, 1, 0);
+            add(b, ctm, 0, 1);
+            add(b, ctm, 1, 1);
+            Shape s = new Shape();
+            s.x0 = b[0] - box.getLowerLeftX();
+            s.x1 = b[2] - box.getLowerLeftX();
+            s.y0 = box.getUpperRightY() - b[3];
+            s.y1 = box.getUpperRightY() - b[1];
+            s.fill = true;
+            s.subpaths = 1;
+            s.curved = w > 2 && h > 2;               // a real glyph, not a 1x1 rule
+            if (bilevel && data != null && w > 4 && h > 4) {
+                try {
+                    int stride = (w + 7) / 8;
+                    byte[] bits = new byte[stride * h];
+                    int read = 0, n;
+                    while (read < bits.length && (n = data.read(bits, read, bits.length - read)) > 0) read += n;
+                    // image masks paint where the sample is 0
+                    int ink = 0;
+                    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (bit(bits, stride, x, y) == 0) ink++;
+                    s.ink = (double) ink / (w * h);
+                    // hollow glyph (like a path with a hole): white centre, ink left+right and above+below
+                    int cx = w / 2, cy = h / 2;
+                    boolean centreWhite = true;
+                    for (int y = cy - h / 10; y <= cy + h / 10; y++)
+                        for (int x = cx - w / 10; x <= cx + w / 10; x++)
+                            if (x >= 0 && y >= 0 && x < w && y < h && bit(bits, stride, x, y) == 0) centreWhite = false;
+                    boolean left = false, right = false, up = false, down = false;
+                    for (int x = 0; x < cx; x++) if (bit(bits, stride, x, cy) == 0) left = true;
+                    for (int x = cx + 1; x < w; x++) if (bit(bits, stride, x, cy) == 0) right = true;
+                    for (int y = 0; y < cy; y++) if (bit(bits, stride, cx, y) == 0) up = true;
+                    for (int y = cy + 1; y < h; y++) if (bit(bits, stride, cx, y) == 0) down = true;
+                    if (centreWhite && left && right && up && down) s.subpaths = 2;
+                } catch (Exception ignored) {
+                    // keep as filled glyph
+                }
+            }
+            if (s.w() > 0 || s.h() > 0) pd.shapes.add(s);
+        }
+
+        private static int bit(byte[] bits, int stride, int x, int y) {
+            return (bits[y * stride + (x >> 3)] >> (7 - (x & 7))) & 1;
         }
 
         private static void addSub(List<double[]> subs, Matrix m, double x, double y) {
@@ -322,6 +523,7 @@ public final class PdfReader {
         @Override
         protected void processTextPosition(TextPosition text) {
             int p = getCurrentPageNo() - 1;
+            if (isSymbolType3(text.getFont())) return;     // drawn music symbols, see PathCollector
             String font = text.getFont() != null ? text.getFont().getName() : null;
             if (font != null && MUSIC_FONT.matcher(font).matches() && p >= 0 && p < pages.size()) {
                 String u = text.getUnicode();
@@ -399,6 +601,7 @@ public final class PdfReader {
                 cur.text = sb.toString();
                 if (!cur.text.isEmpty()) pd.texts.add(cur);
             }
+            for (TextItem t : pd.texts) t.text = fixCyrillic(t.text);
         }
     }
 }

@@ -849,7 +849,9 @@ public final class PdfScoreExtractor {
             }
             if (w < 0.3 && h > 1.5) { stems.add(s); continue; }
             if (h < 0.15) continue;                                  // ledger line
-            if (s.curved && h >= 0.85 && h <= 1.25 && w >= 1.05 && w <= 1.55) {
+            // bitmap glyphs: a filled head is mostly ink; accents, boxes etc. are not
+            boolean headInk = s.ink < 0 || s.subpaths >= 2 || s.ink > 0.5;
+            if (s.curved && headInk && h >= 0.85 && h <= 1.25 && w >= 1.05 && w <= 1.55) {
                 Head hd = new Head();
                 hd.s = s;
                 hd.kind = s.subpaths >= 2 ? 2 : 1;
@@ -1041,10 +1043,24 @@ public final class PdfScoreExtractor {
         List<Shape> keyAcc = new ArrayList<>();
         for (Shape s : others) {
             double w = s.w() / sp, h = s.h() / sp;
-            if (s.curved && s.subpaths >= 2 && h >= 2.2 && h <= 3.3 && w >= 0.55 && w <= 1.25) {
+            boolean accSize = s.curved && h >= 2.1 && h <= 3.3 && w >= 0.55 && w <= 1.25;
+            if (accSize && s.subpaths >= 2) {
                 if (s.x1 < firstX - 0.2 * sp) keyAcc.add(s);
                 else accs.add(s);
                 continue;
+            }
+            // bitmap accidentals have no "hole" flag: take them by position (key signature zone,
+            // or right in front of a head on the same staff position)
+            if (accSize && s.ink >= 0) {
+                if (s.x1 < firstX - 0.2 * sp) { keyAcc.add(s); continue; }
+                boolean beforeHead = false;
+                for (Head hd : heads) {
+                    double dx = hd.s.x0 - s.x1;
+                    if (dx < -0.2 * sp || dx > 2.0 * sp) continue;
+                    int type = accType(s, sp);
+                    if (accPos(s, type, st) == hd.pos) beforeHead = true;
+                }
+                if (beforeHead) { accs.add(s); continue; }
             }
             if (s.curved && w >= 0.85 && w <= 1.5 && h >= 2.4 && h <= 3.3 && s.x0 > firstX - sp) {
                 // quarter rest (narrow) or 16th rest (wider, two hooks)
@@ -1058,7 +1074,7 @@ public final class PdfScoreExtractor {
                 continue;
             }
             if (s.curved && h < 2.2 && w > 1.2) { curves.add(s); continue; }
-            if (s.curved && w >= 0.55 && w <= 1.25 && h >= 1.1 && h <= 1.7 && clef != null
+            if (s.curved && w >= 0.55 && w <= 1.25 && h >= 0.9 && h <= 1.7 && clef != null
                     && s.cx() > clef.x0 && s.cx() < clef.x1 && s.y0 > clef.y1 - 0.5 * sp) {
                 // small "8" under a treble clef: octave lower
                 if (st.clef.equals("treble")) { st.clef = "treble-8"; st.bottomDiatonic -= 7; }
