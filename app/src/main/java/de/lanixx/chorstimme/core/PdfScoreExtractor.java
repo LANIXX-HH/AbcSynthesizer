@@ -76,6 +76,9 @@ public final class PdfScoreExtractor {
         int[] midi;
         int bar;               // bar index on the staff (bar lines left of it)
         boolean barRest;       // whole-bar rest: length taken from the other voices / metre
+        double anchor;         // x of the time column this event starts in
+        int col;               // index of that column
+        double start;          // beats from the start of the line
     }
 
     // ------------------------------------------------------------ entry point
@@ -149,6 +152,7 @@ public final class PdfScoreExtractor {
         int sysCount = 0;
         for (Staff st : staves) sysCount = Math.max(sysCount, st.system + 1);
         Event[] lastEvent = new Event[total];
+        List<Integer> conflictLines = new ArrayList<>();
         double[] meterOfStaff = new double[sys0Staves];   // beats per bar, carried over lines
         boolean warnedExtra = false;
 
@@ -207,52 +211,50 @@ public final class PdfScoreExtractor {
                 }
                 if (!st.meters.isEmpty()) meterOfStaff[idx] = st.meters.get(st.meters.size() - 1)[1];
             }
-            // 3) timeline
-            double sysEnd = t;
-            List<double[]> lens = new ArrayList<>();
+            // 3) timeline: aligned on the horizontal note positions of all voices
+            List<int[]> voiceOf = new ArrayList<>();          // {global voice}
+            List<List<Event>> lists = new ArrayList<>();
+            List<Staff> staffOf = new ArrayList<>();
             for (Staff st : line) {
                 List<List<Event>> evs = evMap.get(st);
                 for (int v = 0; v < voicesPerStaff[st.indexInSystem]; v++) {
-                    int gv = offset[st.indexInSystem] + v;
-                    Score.Voice voice = score.voices.get(gv);
-                    double vt = t;
-                    List<Event> list = evs.get(v);
-                    for (int i = 0; i < list.size(); i++) {
-                        Event e = list.get(i);
-                        // tie from the end of the previous line
-                        if (i == 0 && lastEvent[gv] != null && lastEvent[gv].tieToNext && !e.rest
-                                && samePitches(lastEvent[gv].midi, e.midi) && !voice.notes.isEmpty()) {
-                            Score.Note prev = voice.notes.get(voice.notes.size() - 1);
+                    voiceOf.add(new int[]{offset[st.indexInSystem] + v});
+                    lists.add(evs.get(v));
+                    staffOf.add(st);
+                }
+            }
+            LineTiming lt = alignLine(lists, staffOf);
+            if (lt.conflicts > 0) conflictLines.add(sys + 1);
+            for (int k = 0; k < lists.size(); k++) {
+                int gv = voiceOf.get(k)[0];
+                Score.Voice voice = score.voices.get(gv);
+                List<Event> list = lists.get(k);
+                for (int i = 0; i < list.size(); i++) {
+                    Event e = list.get(i);
+                    double start = t + e.start;
+                    // tie from the end of the previous line
+                    if (i == 0 && lastEvent[gv] != null && lastEvent[gv].tieToNext && !e.rest
+                            && samePitches(lastEvent[gv].midi, e.midi) && !voice.notes.isEmpty()) {
+                        Score.Note prev = voice.notes.get(voice.notes.size() - 1);
+                        if (Math.abs(prev.end() - start) < 1e-6) {
                             prev.duration += e.dur;
-                            vt += e.dur;
                             lastEvent[gv] = e;
                             continue;
                         }
-                        if (!e.rest) {
-                            Score.Note n = new Score.Note(vt, e.dur, e.midi);
-                            n.syllable = e.syllable;
-                            voice.notes.add(n);
-                        }
-                        vt += e.dur;
-                        lastEvent[gv] = e.rest ? null : e;
                     }
-                    if (!list.isEmpty()) lens.add(new double[]{gv, vt - t});
-                    sysEnd = Math.max(sysEnd, vt);
+                    if (!e.rest) {
+                        Score.Note n = new Score.Note(start, e.dur, e.midi);
+                        n.syllable = e.syllable;
+                        voice.notes.add(n);
+                    }
+                    lastEvent[gv] = e.rest ? null : e;
                 }
             }
-            // consistency check: all voices of a line should last equally long
-            double mx = 0, mn = Double.MAX_VALUE;
-            for (double[] l : lens) { mx = Math.max(mx, l[1]); mn = Math.min(mn, l[1]); }
-            if (lens.size() > 1 && mx - mn > 0.01) {
-                StringBuilder sb = new StringBuilder("Zeile " + (sys + 1) + ": Stimmen unterschiedlich lang (");
-                for (int i = 0; i < lens.size(); i++) {
-                    if (i > 0) sb.append(", ");
-                    sb.append(score.voices.get((int) lens.get(i)[0]).name).append(' ').append(fmt(lens.get(i)[1]));
-                }
-                sb.append(" Schläge) – Erkennung prüfen.");
-                score.warnings.add(sb.toString());
-            }
-            t = sysEnd;
+            t += lt.length;
+        }
+        if (!conflictLines.isEmpty()) {
+            score.warnings.add("Zeile " + joinInts(conflictLines) + ": einzelne Notenwerte passten nicht zusammen und "
+                    + "wurden an den anderen Stimmen ausgerichtet (Takt bleibt synchron). Beim Anhören prüfen.");
         }
         // drop empty voices
         for (int v = score.voices.size() - 1; v >= 0; v--) {
@@ -261,6 +263,201 @@ public final class PdfScoreExtractor {
         if (score.noteCount() == 0) score.warnings.add("Keine Noten erkannt.");
         score.assignVowels();
         return score;
+    }
+
+    static final class LineTiming {
+        double length;
+        int conflicts;
+    }
+
+    /**
+     * Gives every event of one line its start time and length.
+     *
+     * Notes sounding together are printed one above the other, in every engraving. So the time of
+     * an event comes from its horizontal position: all voices are sorted into common columns, and
+     * each column gets the time most voices agree on (previous column + note value). An event
+     * lasts until the next event of its voice. A misread note value or a lost note therefore stays
+     * a local error instead of shifting the rest of its voice.
+     */
+    static LineTiming alignLine(List<List<Event>> lists, List<Staff> staffOf) {
+        LineTiming lt = new LineTiming();
+        double sp = 5;
+        for (Staff st : staffOf) sp = st.sp;
+
+        // anchors: where a note starts horizontally (head centre on the normal side of the stem)
+        List<Event> anchored = new ArrayList<>();
+        for (int k = 0; k < lists.size(); k++) {
+            Staff st = staffOf.get(k);
+            for (Event e : lists.get(k)) {
+                if (e.barRest) continue;
+                e.anchor = anchorOf(e, st.sp);
+                anchored.add(e);
+            }
+        }
+        anchored.sort(Comparator.comparingDouble(e -> e.anchor));
+        Map<Event, Integer> listOf = new java.util.IdentityHashMap<>();
+        for (int k = 0; k < lists.size(); k++) for (Event e : lists.get(k)) listOf.put(e, k);
+        // tight columns first; then neighbouring columns are joined when no voice has a note in
+        // both – that is a head pushed aside (second between two voices), not a later moment
+        List<List<Event>> groups = new ArrayList<>();
+        for (Event e : anchored) {
+            List<Event> g = groups.isEmpty() ? null : groups.get(groups.size() - 1);
+            if (g != null && e.anchor - g.get(0).anchor <= 0.6 * sp) g.add(e);
+            else {
+                g = new ArrayList<>();
+                g.add(e);
+                groups.add(g);
+            }
+        }
+        for (int j = groups.size() - 1; j > 0; j--) {
+            List<Event> a = groups.get(j - 1), b = groups.get(j);
+            double gap = b.get(0).anchor - a.get(a.size() - 1).anchor;
+            if (gap > 1.8 * sp) continue;
+            boolean shared = false;
+            for (Event x : a) for (Event y : b) if (listOf.get(x).equals(listOf.get(y))) shared = true;
+            if (!shared) {
+                a.addAll(b);
+                groups.remove(j);
+            }
+        }
+        List<Double> cols = new ArrayList<>();
+        for (List<Event> g : groups) {
+            double m = Double.MAX_VALUE;
+            for (Event e : g) m = Math.min(m, e.anchor);
+            cols.add(m);
+            for (Event e : g) e.anchor = m;
+        }
+
+        // whole-bar rests start at the first column of their bar
+        for (int k = 0; k < lists.size(); k++) {
+            Staff st = staffOf.get(k);
+            for (Event e : lists.get(k)) {
+                if (!e.barRest) continue;
+                double barStart = Double.NEGATIVE_INFINITY, barEnd = Double.MAX_VALUE;
+                for (double bx : st.barXs) {
+                    if (bx < e.cx) barStart = bx;
+                    else { barEnd = bx; break; }
+                }
+                double a = Double.NaN;
+                for (double c : cols) if (c > barStart && c < barEnd) { a = c; break; }
+                if (Double.isNaN(a)) {
+                    a = barStart > Double.NEGATIVE_INFINITY ? barStart + 0.5 * sp : e.cx;
+                    cols.add(a);
+                    cols.sort(Double::compare);
+                }
+                e.anchor = a;
+            }
+        }
+        int C = cols.size();
+        for (List<Event> list : lists) {
+            for (Event e : list) e.col = nearest(cols, e.anchor);
+            list.sort((x, y) -> x.col != y.col ? Integer.compare(x.col, y.col) : Double.compare(x.cx, y.cx));
+            // two events of one voice in one column: same moment, keep them as one chord
+            for (int i = list.size() - 1; i > 0; i--) {
+                Event a = list.get(i - 1), b = list.get(i);
+                if (a.col != b.col) continue;
+                if (a.rest && !b.rest) { list.remove(i - 1); continue; }
+                if (!a.rest && !b.rest && a.midi != null && b.midi != null) {
+                    int[] m = java.util.Arrays.copyOf(a.midi, a.midi.length + b.midi.length);
+                    System.arraycopy(b.midi, 0, m, a.midi.length, b.midi.length);
+                    a.midi = m;
+                    if (a.syllable == null) a.syllable = b.syllable;
+                }
+                a.dur = Math.max(a.dur, b.dur);
+                list.remove(i);
+            }
+        }
+        if (C == 0) return lt;
+
+        // column times: vote of all voices (time of the previous event + its note value)
+        double[] time = new double[C];
+        time[0] = 0;
+        for (int j = 1; j < C; j++) {
+            Map<Long, Integer> votes = new HashMap<>();
+            for (List<Event> list : lists) {
+                for (int i = 1; i < list.size(); i++) {
+                    Event prev = list.get(i - 1), cur = list.get(i);
+                    if (cur.col != j || prev.col >= j) continue;
+                    long key = Math.round((time[prev.col] + prev.dur) * 96);
+                    votes.merge(key, 1, Integer::sum);
+                }
+            }
+            double best = Double.NaN;
+            int bestVotes = 0, all = 0;
+            for (Map.Entry<Long, Integer> v : votes.entrySet()) {
+                all += v.getValue();
+                double val = v.getKey() / 96.0;
+                if (val <= time[j - 1] + 1e-6) continue;
+                if (v.getValue() > bestVotes || v.getValue() == bestVotes && val < best) {
+                    bestVotes = v.getValue();
+                    best = val;
+                }
+            }
+            if (Double.isNaN(best)) {
+                // nobody arrives here directly: shortest event of the previous column decides
+                double d = Double.MAX_VALUE;
+                for (List<Event> list : lists) for (Event e : list) if (e.col == j - 1 && e.dur > 0) d = Math.min(d, e.dur);
+                best = time[j - 1] + (d == Double.MAX_VALUE ? 1 : d);
+            }
+            time[j] = best;
+        }
+        // end of the line: vote of the last events
+        Map<Long, Integer> endVotes = new HashMap<>();
+        for (List<Event> list : lists) {
+            if (list.isEmpty()) continue;
+            Event last = list.get(list.size() - 1);
+            endVotes.merge(Math.round((time[last.col] + last.dur) * 96), 1, Integer::sum);
+        }
+        double end = time[C - 1];
+        int ev = 0;
+        for (Map.Entry<Long, Integer> v : endVotes.entrySet()) {
+            double val = v.getKey() / 96.0;
+            if (val > time[C - 1] && (v.getValue() > ev || v.getValue() == ev && val > end)) { ev = v.getValue(); end = val; }
+        }
+        if (end <= time[C - 1]) end = time[C - 1] + 1;
+        // start and length of every event
+        for (List<Event> list : lists) {
+            for (int i = 0; i < list.size(); i++) {
+                Event e = list.get(i);
+                e.start = time[e.col];
+                double next = i + 1 < list.size() ? time[list.get(i + 1).col] : end;
+                double len = next - e.start;
+                // a note whose read value had to change is a recognition conflict
+                if (Math.abs(len - e.dur) > 1e-3 && !e.barRest && i + 1 < list.size()) lt.conflicts++;
+                e.dur = len > 1e-6 ? len : Math.max(e.dur, 0.25);
+            }
+        }
+        lt.length = end;
+        return lt;
+    }
+
+    private static double anchorOf(Event e, double sp) {
+        if (!e.rest && !e.heads.isEmpty()) {
+            Head h0 = e.heads.get(0);
+            if (h0.stem != null) {
+                // normal head position next to the stem, whichever side a second pushed it to
+                return h0.stemUp ? h0.stem.cx() - 0.65 * sp : h0.stem.cx() + 0.65 * sp;
+            }
+            double m = Double.MAX_VALUE;
+            for (Head h : e.heads) m = Math.min(m, h.s.cx());
+            return m;
+        }
+        return e.cx;
+    }
+
+    private static int nearest(List<Double> cols, double x) {
+        int best = 0;
+        for (int i = 1; i < cols.size(); i++) if (Math.abs(cols.get(i) - x) < Math.abs(cols.get(best) - x)) best = i;
+        return best;
+    }
+
+    private static String joinInts(List<Integer> l) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < l.size(); i++) {
+            if (i > 0) sb.append(i == l.size() - 1 ? " und " : ", ");
+            sb.append(l.get(i));
+        }
+        return sb.toString();
     }
 
     private static String fmt(double d) {
