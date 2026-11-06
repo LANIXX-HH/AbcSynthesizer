@@ -94,6 +94,12 @@ public final class AbcWriter {
                 }
                 prev = c;
             }
+            // a metre change in the first bar of a line is written as an own M: line:
+            // abcjs up to 6.4 crashes on an inline [M:] right after [V:] at a line start
+            if (!meters.isEmpty() && !meters.get(0).isEmpty()) {
+                out.append(meters.get(0), 1, meters.get(0).length() - 1).append('\n');
+                meters.set(0, "");
+            }
             for (int v = 0; v < nv; v++) {
                 Score.Voice voice = score.voices.get(v);
                 StringBuilder music = new StringBuilder();
