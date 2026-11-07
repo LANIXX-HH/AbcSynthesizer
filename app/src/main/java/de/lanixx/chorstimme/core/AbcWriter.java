@@ -14,7 +14,7 @@ public final class AbcWriter {
 
     private AbcWriter() {}
 
-    private static final double UNIT = 0.5;            // L:1/8 = half a beat
+    private static final double UNIT = 1.0;            // L:1/4 = one beat (breve = 8)
     private static final double EPS = 1e-6;
 
     public static String write(Score score) {
@@ -41,7 +41,7 @@ public final class AbcWriter {
         out.append("X:1\n");
         out.append("T:").append(score.title == null || score.title.isEmpty() ? "Chorstimme" : oneLine(score.title)).append('\n');
         out.append("M:").append(freeRhythm ? "none" : meterText(meter)).append('\n');
-        out.append("L:1/8\n");
+        out.append("L:1/4\n");
         out.append("Q:1/4=").append(Math.round(score.tempoBpm)).append('\n');
         int nv = score.voices.size();
         if (nv == 4) out.append("%%score (1 2) (3 4)\n");
@@ -204,7 +204,7 @@ public final class AbcWriter {
         return d.size() == 1 && Math.abs(d.get(0) - units) < 1e-4 && Math.abs(units * 64 - Math.rint(units * 64)) < 1e-3;
     }
 
-    /** Splits a length (in 1/8 units) into plain and dotted values, largest first. */
+    /** Splits a length (in L: units) into plain and dotted values, largest first. */
     static List<Double> decompose(double units) {
         List<Double> allowed = new ArrayList<>();
         for (int k = -3; k <= 4; k++) {
@@ -344,11 +344,16 @@ public final class AbcWriter {
         return sb.toString();
     }
 
+    /** Bass clef when the lowest voice of the staff lies mostly below middle C. */
     private static String clefFor(List<Score.Voice> vs) {
-        double sum = 0, n = 0;
-        for (Score.Voice v : vs) for (Score.Note x : v.notes) for (int p : x.pitches) { sum += p * x.duration; n += x.duration; }
-        double avg = n > 0 ? sum / n : 65;
-        return avg < 57 ? "bass" : "treble";
+        double lowest = Double.MAX_VALUE;
+        for (Score.Voice v : vs) {
+            double sum = 0, n = 0;
+            for (Score.Note x : v.notes) for (int p : x.pitches) { sum += p * x.duration; n += x.duration; }
+            if (n > 0) lowest = Math.min(lowest, sum / n);
+        }
+        if (lowest == Double.MAX_VALUE) return "treble";
+        return lowest < 55 ? "bass" : "treble";
     }
 
     // ------------------------------------------------------------ lyrics

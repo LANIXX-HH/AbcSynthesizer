@@ -17,7 +17,11 @@ dem Handy.
   Lyrics-Events – z. B. in MuseScore lesbar), **ABC speichern** (ABC-Notation mit Stimmen,
   Takten, Tonart, Liedtext; direkt in abcjs/ABC-Editoren nutzbar). MIDI und ABC stehen sofort
   nach dem Einlesen bereit.
-- Prüfung: Sind die Stimmen einer Zeile unterschiedlich lang, zeigt die App einen Hinweis.
+- Rezitation: Stehen unter einer Note mehrere Wörter (Ирмос-/Psalmodie-Satz), wird die Note
+  als Brevis (8 Schläge) gehalten; im ABC steht sie als Brevis mit Wörtern per `~` verbunden
+  (`G8 F E2` / `w: Herr,~erbarme~dich~unser, A-men.`).
+- Zeitachse aus den Notenpositionen aller Stimmen: ein Lesefehler bleibt lokal; der Hinweis
+  nennt Zeilen, in denen Notenwerte angepasst wurden.
 
 ## Grenzen
 
@@ -57,7 +61,7 @@ Bedarf selbst.
 | `core/AbcParser.java` | ABC-Notation |
 | `core/ChoirSynth.java` | Chorklang: additive Formant-Synthese, Vibrato, Hall |
 | `core/MidiWriter.java` | MIDI-Datei |
-| `core/AbcWriter.java` | ABC-Export (Tonart geschätzt, Takte/Zeilen wie erkannt, Triolen, w:-Text) |
+| `core/AbcWriter.java` | ABC-Export (L:1/4, Tonart geschätzt, Takte/Zeilen wie erkannt, Triolen, Brevis-Rezitation, w:-Text) |
 | `core/Mp3Encoder.java` + `cpp/` | MP3 über LAME (NDK/JNI) |
 | `tools/hosttest/` | Tests auf dem Rechner (Desktop-Java) |
 

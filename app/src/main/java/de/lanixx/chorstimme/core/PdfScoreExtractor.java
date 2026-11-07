@@ -76,6 +76,7 @@ public final class PdfScoreExtractor {
         int[] midi;
         int bar;               // bar index on the staff (bar lines left of it)
         boolean barRest;       // whole-bar rest: length taken from the other voices / metre
+        boolean recite;        // carries several words (recitation): held as a breve
         double anchor;         // x of the time column this event starts in
         int col;               // index of that column
         double start;          // beats from the start of the line
@@ -268,6 +269,8 @@ public final class PdfScoreExtractor {
         return score;
     }
 
+    static final double BREVE = 8;     // beats
+
     static final class LineTiming {
         double length;
         int conflicts;
@@ -372,6 +375,12 @@ public final class PdfScoreExtractor {
             }
         }
         if (C == 0) return lt;
+
+        // recitation: a column where a note carries several words is held as a breve (8 beats)
+        // in all voices
+        boolean[] recite = new boolean[C];
+        for (List<Event> list : lists) for (Event e : list) if (e.recite) recite[e.col] = true;
+        for (List<Event> list : lists) for (Event e : list) if (recite[e.col] && e.dur < BREVE) e.dur = BREVE;
 
         // column times: vote of all voices (time of the previous event + its note value)
         double[] time = new double[C];
@@ -616,6 +625,13 @@ public final class PdfScoreExtractor {
                 best.shapes.add(s);
             }
         }
+        // lines with ©, links or mail addresses are page footers, not lyrics
+        java.util.Set<Long> footer = new java.util.HashSet<>();
+        for (TextItem t : pd.texts) {
+            if (t.text.contains("©") || t.text.contains("http") || t.text.contains("@") || t.text.contains("www.")) {
+                footer.add(Math.round(t.baseline));
+            }
+        }
         for (int i = 0; i < staves.size(); i++) {
             Staff st = staves.get(i);
             double nextTop = i + 1 < staves.size() ? staves.get(i + 1).top() : Double.MAX_VALUE;
@@ -627,7 +643,9 @@ public final class PdfScoreExtractor {
                     continue;   // tuplet numbers: handled below
                 } else if (t.x0 > st.x0 - 2 * st.sp && y > st.bottom() + 0.5 * st.sp
                         && y < Math.min(nextTop - 2.5 * st.sp, st.bottom() + 12 * st.sp)
-                        && !DIRECTION.matcher(t.text).matches()) {
+                        && !DIRECTION.matcher(t.text).matches()
+                        && !footer.contains(Math.round(t.baseline)) && !footer.contains(Math.round(t.baseline) - 1)
+                        && !footer.contains(Math.round(t.baseline) + 1)) {
                     st.lyrics.add(t);
                 }
             }
@@ -1543,12 +1561,20 @@ public final class PdfScoreExtractor {
         double first = Double.MAX_VALUE;
         for (TextItem t : st.lyrics) first = Math.min(first, t.baseline);
         List<TextItem> syl = new ArrayList<>();
+        List<TextItem> dashes = new ArrayList<>();
         for (TextItem t : st.lyrics) {
             if (Math.abs(t.baseline - first) > 0.5 * t.fontSize) continue;
-            if (t.text.matches("[-_]+")) continue;
+            if (t.text.matches("[-_]+")) { dashes.add(t); continue; }
             syl.addAll(splitSyllables(t));
         }
         syl.sort(Comparator.comparingDouble(t -> t.x0));
+        // a dash printed on its own between two syllables joins them into one word
+        for (TextItem d : dashes) {
+            if (!d.text.startsWith("-")) continue;
+            TextItem left = null;
+            for (TextItem t : syl) if (t.x1 <= d.x0 + 0.5) left = t;
+            if (left != null && !left.text.endsWith("-") && !isBlank(left.text)) left.text = left.text + "-";
+        }
         List<Event> notes = new ArrayList<>();
         for (Event e : voice) if (!e.rest) notes.add(e);
         int S = syl.size(), N = notes.size();
@@ -1577,6 +1603,7 @@ public final class PdfScoreExtractor {
             }
         }
         int i = S, j = N;
+        List<TextItem> dropped = new ArrayList<>();
         while (i > 0 && j > 0) {
             if (move[i][j] == 1) {
                 String s = syl.get(i - 1).text;
@@ -1585,9 +1612,66 @@ public final class PdfScoreExtractor {
             } else if (move[i][j] == 2) {
                 j--;
             } else {
+                dropped.add(syl.get(i - 1));
                 i--;
             }
         }
+        while (i > 0) dropped.add(syl.get(--i));
+        recitation(notes, dropped, sp);
+    }
+
+    /**
+     * More text than notes: syllables printed in the gap after a note are all sung on that note
+     * (recitation tone). They are joined to its syllable – words by spaces (written as ~ in ABC),
+     * parts of one word directly – and the note is marked; it is held as a breve.
+     */
+    private static void recitation(List<Event> notes, List<TextItem> dropped, double sp) {
+        dropped.sort(Comparator.comparingDouble(t -> t.x0));
+        Map<Event, List<TextItem>> extra = new java.util.LinkedHashMap<>();
+        for (TextItem t : dropped) {
+            if (isBlank(t.text)) continue;
+            double c = (t.x0 + t.x1) / 2;
+            Event prev = null, next = null;
+            for (Event e : notes) {
+                if (e.cx < c - 0.3 * sp) prev = e;
+                else { next = e; break; }
+            }
+            // the reciting tone is the note without stem (breve, whole or black head) next to
+            // the text; the text can stand before it (Obikhod) or after it
+            Event target;
+            if (next != null && stemless(next)) target = next;
+            else if (prev != null) target = prev;
+            else target = next;
+            if (target == null) continue;
+            extra.computeIfAbsent(target, k -> new ArrayList<>()).add(t);
+        }
+        for (Map.Entry<Event, List<TextItem>> en : extra.entrySet()) {
+            Event e = en.getKey();
+            // a recitation tone: a note without stem, or one carrying at least two extra
+            // syllables. A single leftover syllable elsewhere is a reading slip.
+            if (!stemless(e) && en.getValue().size() < 2) continue;
+            List<TextItem> parts = new ArrayList<>(en.getValue());
+            if (e.syllable != null) {
+                TextItem own = new TextItem();
+                own.text = e.syllable;
+                own.x0 = e.cx - 0.1;
+                own.x1 = e.cx + 0.1;
+                parts.add(own);
+            }
+            parts.sort(Comparator.comparingDouble(t -> (t.x0 + t.x1) / 2));
+            StringBuilder sb = new StringBuilder();
+            for (TextItem part : parts) {
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) == '-') sb.setLength(sb.length() - 1);
+                else if (sb.length() > 0) sb.append(' ');
+                sb.append(part.text);
+            }
+            e.syllable = sb.toString();
+            e.recite = true;
+        }
+    }
+
+    private static boolean stemless(Event e) {
+        return !e.rest && !e.heads.isEmpty() && e.heads.get(0).stem == null;
     }
 
     private static List<TextItem> splitSyllables(TextItem t) {
