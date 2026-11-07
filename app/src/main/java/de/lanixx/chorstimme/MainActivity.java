@@ -94,6 +94,13 @@ public class MainActivity extends Activity {
         PDFBoxResourceLoader.init(getApplicationContext());
         mp3File = new File(getCacheDir(), "uebung.mp3");
         setContentView(buildUi());
+        if (android.os.Build.VERSION.SDK_INT >= 30 && getWindow().getInsetsController() != null) {
+            // white status-bar icons on the dark title, dark navigation icons on the light page
+            getWindow().getInsetsController().setSystemBarsAppearance(
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+                            | android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS);
+        }
         refresh();
         handleIntent(getIntent());
     }
@@ -126,12 +133,46 @@ public class MainActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
+    /**
+     * Own title bar instead of the window's action bar: from Android 15 (targetSdk 35) apps are
+     * drawn edge to edge, and the content slid under the action bar. Here the layout itself
+     * keeps clear of status and navigation bar on every Android version.
+     */
     private View buildUi() {
+        LinearLayout outer = new LinearLayout(this);
+        outer.setOrientation(LinearLayout.VERTICAL);
+        outer.setBackgroundColor(Color.rgb(0xFA, 0xFA, 0xFA));
+
+        TextView title = new TextView(this);
+        title.setText("Chorstimme");
+        title.setTextSize(22);
+        title.setTextColor(Color.WHITE);
+        title.setBackgroundColor(Color.rgb(0x21, 0x21, 0x21));
+        title.setPadding(dp(16), dp(14), dp(16), dp(14));
+        outer.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         ScrollView scroll = new ScrollView(this);
+        outer.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(16), dp(12), dp(16), dp(24));
         scroll.addView(root);
+
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            // draw behind the system bars on all versions >= 11 and pad by their size
+            getWindow().setDecorFitsSystemWindows(false);
+            getWindow().setStatusBarColor(Color.TRANSPARENT);
+            getWindow().setNavigationBarColor(Color.TRANSPARENT);
+            outer.setOnApplyWindowInsetsListener((v, insets) -> {
+                android.graphics.Insets bars = insets.getInsets(
+                        android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+                title.setPadding(dp(16) + bars.left, dp(14) + bars.top, dp(16) + bars.right, dp(14));
+                outer.setPadding(0, 0, 0, bars.bottom);
+                scroll.setPadding(bars.left, 0, bars.right, 0);
+                return insets;
+            });
+        }
 
         TextView hint = new TextView(this);
         hint.setText("Noten-PDF (aus abcjs gedruckt) oder ABC-Notation laden. Die App erzeugt daraus "
@@ -245,7 +286,7 @@ public class MainActivity extends Activity {
         lyricsView.setTextIsSelectable(true);
         root.addView(lyricsView, matchWrap(dp(16)));
 
-        return scroll;
+        return outer;
     }
 
     private Button button(String text) {
