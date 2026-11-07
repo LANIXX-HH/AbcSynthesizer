@@ -38,6 +38,8 @@ public final class ImageScoreReader {
     }
 
     private static final double TARGET_SP = 5.5;
+    /** Staff space in pixels below which the picture is enlarged, and the size it is enlarged to. */
+    private static final double MIN_SP_PX = 12, WORK_SP_PX = 14.5;
 
     public static List<PageData> read(Gray g) {
         int w = g.w, h = g.h;
@@ -53,6 +55,16 @@ public final class ImageScoreReader {
 
         List<int[]> lines = staffLines(ink, w, h);           // {y0, y1, x0, x1}
         double sp = staffSpace(lines);
+        // small pictures (messenger apps shrink photos): heads only 8-9 pixels high are too
+        // coarse for hollow/filled and stem tests. Enlarge so a staff space is about 14 pixels
+        if (sp > 0 && sp < MIN_SP_PX) {
+            g = scale(g, WORK_SP_PX / sp);
+            w = g.w;
+            h = g.h;
+            ink = binarize(g);
+            lines = staffLines(ink, w, h);
+            sp = staffSpace(lines);
+        }
         List<PageData> out = new ArrayList<>();
         PageData pd = new PageData();
         out.add(pd);
@@ -93,7 +105,9 @@ public final class ImageScoreReader {
         }
 
         // thin vertical lines: stems (a head at one end) and bar lines (full staff height)
-        List<int[]> verticals = verticalLines(ink, w, h, label, protect, lines, sp);
+        List<int[]> clefBoxes = new ArrayList<>();
+        for (int c = 0; c < comps.size(); c++) if (protect[c + 1]) clefBoxes.add(comps.get(c));
+        List<int[]> verticals = verticalLines(ink, w, h, label, protect, lines, clefBoxes, sp);
         for (int[] v : verticals) {
             Shape s = rect(v[0], v[1], v[2] + 1, v[3] + 1, k);
             s.curved = false;
@@ -146,17 +160,33 @@ public final class ImageScoreReader {
             }
             int bw = b[2] - b[0] + 1, bh = b[3] - b[1] + 1;
             if (b[4] < 3) continue;                                   // specks
+            if (onStaffLine(b, lines)) continue;                      // rest of a staff line
             if (!nearStaff(b, lines, sp)) continue;                   // lyrics, titles, page decoration
             if (outsideWithoutLedger(b, lines, ledgers, verticals, sp)) continue;  // letters of lyrics, dynamics
+            // pieces of thick stems left at a head's side (kept as its rim) can make it wider than
+            // a head: then leave them out
+            int[] full = b;
+            if (bw > 1.55 * sp && bw < 2.3 * sp) b = withoutStemEdges(b, label, c + 1, w, verticals, sp);
+            // stems on both sides: a chord of two voices (a flat has a stroke on one side only)
+            boolean trimmed = b[0] != full[0] && b[2] != full[2];
+            bw = b[2] - b[0] + 1;
             double fill = (double) b[4] / (bw * bh);
             boolean hole = hasHole(label, c + 1, b, w);
             // chords of two or three heads in seconds/thirds touch each other: split them
-            if (fill > 0.4 && bw >= 1.15 * sp && bw <= 2.3 * sp && bh > 1.6 * sp && bh < 3.4 * sp) {
-                int n = (int) Math.round(bh / sp);
+            if (fill > 0.4 && bw >= (trimmed ? 0.9 : 1.15) * sp && bw <= 2.3 * sp && bh > 1.6 * sp && bh < 3.4 * sp) {
+                // rows that are only a stem stub or a bit of staff line do not belong to a head
+                int tt = b[1], tb = b[3];
+                while (tt < tb && rowCount(label, c + 1, b, tt, w) < 0.5 * sp) tt++;
+                while (tb > tt && rowCount(label, c + 1, b, tb, w) < 0.5 * sp) tb--;
+                int th = tb - tt + 1;
+                // stacked heads are a third (one space) apart: one head plus one space per extra head
+                int n = 1 + (int) Math.round((th - 0.95 * sp) / sp);
+                // a narrow sign right after the clef is a flat of the key signature, not a chord
+                boolean keySign = bw < 1.3 * sp && inKeyZone(b, clefBoxes, sp);
                 List<Shape> parts = new ArrayList<>();
-                boolean allHeads = n >= 2;
-                for (int i = 0; i < n; i++) {
-                    int y0 = b[1] + i * bh / n, y1 = b[1] + (i + 1) * bh / n - 1;
+                boolean allHeads = n >= 2 && n <= 3 && !keySign;
+                for (int i = 0; i < n && allHeads; i++) {
+                    int y0 = tt + i * th / n, y1 = tt + (i + 1) * th / n - 1;
                     int[] part = {b[0], y0, b[2], y1, 0};
                     for (int y = y0; y <= y1; y++) for (int x = b[0]; x <= b[2]; x++) if (label[y * w + x] == c + 1) part[4]++;
                     Shape s = rect(b[0], y0, b[2] + 1, y1 + 1, k);
@@ -174,6 +204,8 @@ public final class ImageScoreReader {
             }
             Shape s = rect(b[0], b[1], b[2] + 1, b[3] + 1, k);
             s.ink = fill;
+            s.upperInk = upperShare(label, c + 1, b, w);
+            s.bowlY = wideRowsMiddle(label, c + 1, b, w) * k;
             s.subpaths = hole ? 2 : 1;
             // a hollow head sitting between two staff lines loses its top/bottom edge when the
             // lines are erased; its ink share (about half, a filled head about 3/4) tells it
@@ -184,7 +216,8 @@ public final class ImageScoreReader {
             if (wholeSize && stemsTouching(b, verticals, sp) < 2) s.subpaths = 2;
             double thick = (double) b[4] / bw;                        // mean ink per column
             if (fill > 0.88 && bw > 1.6 * bh) s.curved = false;          // whole/half rest bar
-            else if (s.subpaths == 1 && bw > 1.5 * sp && thick >= 0.35 * sp && bh < 3 * sp) {   // beam(s)
+            else if (s.subpaths == 1 && bw > 1.5 * sp && (bw > 1.6 * bh || bw > 2.2 * sp)
+                    && thick >= 0.35 * sp && bh < 3 * sp) {                  // beam(s); a head is rounder
                 s.curved = false;
                 s.subs.clear();
                 s.subs.addAll(strips(label, c + 1, b, w, k));
@@ -261,6 +294,26 @@ public final class ImageScoreReader {
             if (score > bestScore) { bestScore = score; best = a; }
         }
         return best;
+    }
+
+    /** Enlarges (bilinear). */
+    static Gray scale(Gray g, double f) {
+        int w = (int) Math.round(g.w * f), h = (int) Math.round(g.h * f);
+        byte[] out = new byte[w * h];
+        for (int y = 0; y < h; y++) {
+            double sy = Math.min(g.h - 1.001, Math.max(0, (y + 0.5) / f - 0.5));
+            int y0 = (int) sy;
+            double fy = sy - y0;
+            for (int x = 0; x < w; x++) {
+                double sx = Math.min(g.w - 1.001, Math.max(0, (x + 0.5) / f - 0.5));
+                int x0 = (int) sx;
+                double fx = sx - x0;
+                double top = g.at(x0, y0) * (1 - fx) + g.at(x0 + 1, y0) * fx;
+                double bot = g.at(x0, y0 + 1) * (1 - fx) + g.at(x0 + 1, y0 + 1) * fx;
+                out[y * w + x] = (byte) (int) Math.round(top * (1 - fy) + bot * fy);
+            }
+        }
+        return new Gray(w, h, out);
     }
 
     /** Rotates so that rows running at the given angle become horizontal (bilinear, white edges). */
@@ -453,6 +506,80 @@ public final class ImageScoreReader {
         return 0;
     }
 
+    /** Another long vertical stroke closer than a head's width on that side: the ink between is
+     *  the bowl of a flat (key signatures put flats side by side), not a note head. */
+    static boolean strokeBeside(boolean[] ink, int w, int h, int[] g, int end, int side, double sp) {
+        int ya = Math.max(0, (int) (end - 2.5 * sp)), yb = Math.min(h - 1, (int) (end + 2.5 * sp));
+        int from = side < 0 ? g[0] - 2 : g[2] + 2;
+        for (int d = 0; d < 0.9 * sp; d++) {
+            int x = from + side * d;
+            if (x < 0 || x >= w) break;
+            int run = 0, best = 0;
+            for (int y = ya; y <= yb; y++) {
+                run = ink[y * w + x] ? run + 1 : 0;
+                best = Math.max(best, run);
+            }
+            if (best >= 2 * sp) return true;
+        }
+        return false;
+    }
+
+    /** Box of a component without the columns of a stem running along its left or right edge. */
+    static int[] withoutStemEdges(int[] b, int[] label, int id, int w, List<int[]> verticals, double sp) {
+        int x0 = b[0], x1 = b[2];
+        for (int[] v : verticals) {
+            if (v[3] < b[1] || v[1] > b[3]) continue;
+            if (v[2] >= b[0] - 1 && v[2] < b[0] + 0.4 * sp) x0 = Math.max(x0, v[2] + 1);
+            if (v[0] <= b[2] + 1 && v[0] > b[2] - 0.4 * sp) x1 = Math.min(x1, v[0] - 1);
+        }
+        if (x0 == b[0] && x1 == b[2] || x1 - x0 + 1 < 0.9 * sp) return b;
+        int n = 0;
+        for (int y = b[1]; y <= b[3]; y++) for (int x = x0; x <= x1; x++) if (label[y * w + x] == id) n++;
+        return new int[]{x0, b[1], x1, b[3], n};
+    }
+
+    /** Pixels of component id in row y. */
+    static int rowCount(int[] label, int id, int[] b, int y, int w) {
+        int n = 0;
+        for (int x = b[0]; x <= b[2]; x++) if (label[y * w + x] == id) n++;
+        return n;
+    }
+
+    /** Mean y of the rows that are at least 60 % as wide as the widest row. */
+    static double wideRowsMiddle(int[] label, int id, int[] b, int w) {
+        int[] cnt = new int[b[3] - b[1] + 1];
+        int max = 0;
+        for (int y = b[1]; y <= b[3]; y++) {
+            cnt[y - b[1]] = rowCount(label, id, b, y, w);
+            max = Math.max(max, cnt[y - b[1]]);
+        }
+        double sum = 0;
+        int n = 0;
+        for (int i = 0; i < cnt.length; i++) if (cnt[i] >= 0.6 * max) { sum += b[1] + i + 0.5; n++; }
+        return n == 0 ? (b[1] + b[3]) / 2.0 : sum / n;
+    }
+
+    /** Share of a component's pixels in the upper half of its box. */
+    static double upperShare(int[] label, int id, int[] b, int w) {
+        int mid = (b[1] + b[3]) / 2, up = 0, all = 0;
+        for (int y = b[1]; y <= b[3]; y++) {
+            for (int x = b[0]; x <= b[2]; x++) {
+                if (label[y * w + x] != id) continue;
+                all++;
+                if (y < mid) up++;
+            }
+        }
+        return all == 0 ? 0.5 : (double) up / all;
+    }
+
+    /** Lies entirely within a staff line (plus a pixel): a piece the line erasure left over. */
+    static boolean onStaffLine(int[] b, List<int[]> lines) {
+        for (int[] l : lines) {
+            if (b[1] >= l[0] - 2 && b[3] <= l[1] + 2 && b[0] >= l[2] - 2 && b[2] <= l[3] + 2) return true;
+        }
+        return false;
+    }
+
     /** Length of the ink run in row y starting at x and going in direction dir. */
     static int sideRun(boolean[] ink, int w, int x, int y, int dir) {
         int n = 0;
@@ -472,7 +599,7 @@ public final class ImageScoreReader {
     // ------------------------------------------------------------------ vertical lines
 
     static List<int[]> verticalLines(boolean[] ink, int w, int h, int[] label, boolean[] protect,
-                                     List<int[]> lines, double sp) {
+                                     List<int[]> lines, List<int[]> clefBoxes, double sp) {
         int minLen = (int) Math.round(2.5 * sp);     // a flat's stem is shorter
         // vertical runs per column
         List<int[]> runs = new ArrayList<>();       // {x, y0, y1}
@@ -521,13 +648,22 @@ public final class ImageScoreReader {
                 int[] top = lines.get(i), bot = lines.get(i + 4);
                 if (g[1] <= top[1] + 0.3 * sp && g[3] >= bot[0] - 0.3 * sp) fullStaff = true;
             }
-            if (fullStaff || (gw <= 0.35 * sp && headAtEnd(ink, w, h, g, sp))) out.add(g);
+            if (fullStaff || (gw <= 0.35 * sp && headAtEnd(ink, w, h, g, sp, inKeyZone(g, clefBoxes, sp)))) out.add(g);
         }
         return out;
     }
 
     /** A note head next to one end of a vertical line (so it is a stem, not part of a sharp). */
-    static boolean headAtEnd(boolean[] ink, int w, int h, int[] g, double sp) {
+    /** Just right of a clef, where the key signature stands. */
+    static boolean inKeyZone(int[] g, List<int[]> clefBoxes, double sp) {
+        double cy = (g[1] + g[3]) / 2.0;
+        for (int[] b : clefBoxes) {
+            if (Math.abs((b[1] + b[3]) / 2.0 - cy) < 4 * sp && g[0] > b[2] && g[0] < b[2] + 4.5 * sp) return true;
+        }
+        return false;
+    }
+
+    static boolean headAtEnd(boolean[] ink, int w, int h, int[] g, double sp, boolean keyZone) {
         // stem up: head left of the bottom end; stem down: head right of the top end
         // (a flat's stroke has its note on the right of the bottom end – not a stem)
         for (int end : new int[]{g[1], g[3]}) {
@@ -536,11 +672,16 @@ public final class ImageScoreReader {
             for (int side = side0; side == side0; side += 2) {
                 int xa = side < 0 ? (int) (g[0] - 1.5 * sp) : g[2] + 1;
                 int xb = side < 0 ? g[0] - 1 : (int) (g[2] + 1.5 * sp);
-                int cnt = 0;
-                for (int y = Math.max(0, ya); y <= Math.min(h - 1, yb); y++)
+                int cnt = 0, joined = 0;
+                for (int y = Math.max(0, ya); y <= Math.min(h - 1, yb); y++) {
                     for (int x = Math.max(0, xa); x <= Math.min(w - 1, xb); x++)
                         if (ink[y * w + x]) cnt++;
-                if (cnt >= 0.45 * sp * sp) return true;
+                    // the head touches its stem (a hollow one at least with its rim). A
+                    // neighbouring sign, like the next flat of a key signature, stands apart
+                    int xn = side < 0 ? g[0] - 1 : g[2] + 1;
+                    if (xn >= 0 && xn < w && ink[y * w + xn]) joined++;
+                }
+                if (cnt >= 0.45 * sp * sp && joined >= 2 && !(keyZone && strokeBeside(ink, w, h, g, end, side, sp))) return true;
             }
         }
         return false;

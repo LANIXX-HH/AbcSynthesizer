@@ -44,6 +44,7 @@ public final class PdfScoreExtractor {
         boolean glyphMode;               // notes come from a music font (Finale & Co.)
         char glyphClef;
         final List<double[]> meters = new ArrayList<>();   // {x, beats per bar} from time signatures
+        final List<Shape> clefDots = new ArrayList<>();    // the two dots of an F clef (bitmaps)
         List<Shape> pageShapes = new ArrayList<>();       // all shapes of the page (for bar lines)
         List<Double> barXs = new ArrayList<>();
 
@@ -178,6 +179,12 @@ public final class PdfScoreExtractor {
                     // keep auto-read result
                 }
                 while (evs.size() < want) evs.add(new ArrayList<>());
+                if (debug != null) {
+                    StringBuilder d = new StringBuilder();
+                    for (List<Event> l : evs) d.append(l.size()).append(' ');
+                    debug.println("sys " + sys + " staff " + st.indexInSystem + " page " + st.page + " y " + (int) st.top()
+                            + " clef " + st.clef + " key " + st.keySig + " voices " + evs.size() + " events " + d);
+                }
                 line.add(st);
                 evMap.put(st, evs);
             }
@@ -666,6 +673,9 @@ public final class PdfScoreExtractor {
     }
 
     /** Systems: staves joined by a vertical line at their left edge belong together. */
+    /** Set by tests to print what was found per staff. */
+    public static java.io.PrintStream debug;
+
     static void groupSystems(List<PageData> pages, List<Staff> staves) {
         int sys = -1;
         Staff prev = null;
@@ -674,7 +684,7 @@ public final class PdfScoreExtractor {
             boolean joined = false;
             if (prev != null && prev.page == st.page) {
                 for (Shape s : pages.get(st.page).shapes) {
-                    if (s.w() < 1.5 && Math.abs(s.x0 - st.x0) < 2.5 && s.y0 <= prev.bottom() + 0.5
+                    if (s.w() < Math.max(1.5, 0.45 * st.sp) && Math.abs(s.x0 - st.x0) < 2.5 && s.y0 <= prev.bottom() + 0.5
                             && s.y1 >= st.top() - 0.5) {
                         joined = true;
                         break;
@@ -901,6 +911,7 @@ public final class PdfScoreExtractor {
         }
 
         identifyClef(st, clef, sh);
+        final Shape clefBox = clef;
         for (Shape a : meterDigits) {
             for (Shape b : meterDigits) {
                 if (a == b || Math.abs(a.x0 - b.x0) > 0.6 * sp || a.cy() >= b.cy()) continue;
@@ -1032,7 +1043,12 @@ public final class PdfScoreExtractor {
         // first musical x (after clef / key / time)
         double firstX = Double.MAX_VALUE;
         for (Head hd : heads) firstX = Math.min(firstX, hd.s.x0);
+        rectRests.removeIf(r -> clefBox != null && r.x1 < clefBox.x1);   // brace ends etc.
         for (Shape r : rectRests) firstX = Math.min(firstX, r.x0);
+        if (debug != null) {
+            for (Head hd : heads) if (hd.s.x0 == firstX) debug.println("  firstX head " + hd.s);
+            for (Shape r : rectRests) if (r.x0 == firstX) debug.println("  firstX rest " + r);
+        }
 
         // accidentals and quarter / eighth rests among the remaining shapes
         restGlyphs.addAll(rectRests);
@@ -1062,10 +1078,11 @@ public final class PdfScoreExtractor {
             }
         }
         others.removeAll(timeSig);
+        others.removeAll(st.clefDots);
         List<Shape> keyAcc = new ArrayList<>();
         for (Shape s : others) {
             double w = s.w() / sp, h = s.h() / sp;
-            boolean accSize = s.curved && h >= 2.1 && h <= 3.3 && w >= 0.55 && w <= 1.25;
+            boolean accSize = s.curved && h >= 2.1 && h <= (s.ink >= 0 ? 3.6 : 3.3) && w >= 0.55 && w <= 1.25;
             if (accSize && s.subpaths >= 2) {
                 if (s.x1 < firstX - 0.2 * sp) keyAcc.add(s);
                 else accs.add(s);
@@ -1518,13 +1535,16 @@ public final class PdfScoreExtractor {
     /** -1 flat, 1 sharp, 2 natural */
     private static int accType(Shape a, double sp) {
         double w = a.w() / sp, h = a.h() / sp;
+        // bitmap: a flat has its bowl below and only the thin stroke above
+        if (a.upperInk >= 0 && a.upperInk < 0.44) return -1;      // sharps and naturals: about 0.5
         if (w < 0.8) return 2;
         if (h < 2.7) return -1;
         return 1;
     }
 
     private static int accPos(Shape a, int type, Staff st) {
-        double y = type == -1 ? a.y1 - 0.62 * st.sp : a.cy();
+        // a flat's note sits in its bowl (bitmaps: measured, the bowl's height differs by font)
+        double y = type == -1 ? (a.bowlY >= 0 ? a.bowlY + 0.15 * st.sp : a.y1 - 0.62 * st.sp) : a.cy();
         return (int) Math.round((st.bottom() - y) / (st.sp / 2));
     }
 
@@ -1543,7 +1563,8 @@ public final class PdfScoreExtractor {
         } else if (h > 5.5) {
             st.clef = "treble";
             st.bottomDiatonic = 30;              // E4
-        } else if (h < 3.5) {
+        } else if (h < 3.5 || clef.ink >= 0 && hasClefDots(clef, all, sp, st.clefDots)) {
+            // (bitmap: some fonts draw the F clef as tall as a C clef; its two dots tell)
             st.clef = "bass";
             st.bottomDiatonic = 18;              // G2
         } else if (Math.abs(clef.cy() - st.lines[1]) < 0.5 * sp) {
@@ -1553,6 +1574,22 @@ public final class PdfScoreExtractor {
             st.clef = "alto";
             st.bottomDiatonic = 24;              // F3
         }
+    }
+
+    /** Two small blobs just right of the clef, above and below the 4th line: an F clef. */
+    private static boolean hasClefDots(Shape clef, List<Shape> all, double sp, List<Shape> found) {
+        int n = 0;
+        for (Shape s : all) {
+            if (s == clef || s.ink < 0) continue;
+            double w = s.w() / sp, h = s.h() / sp;
+            if (w < 0.3 || w > 0.95) continue;
+            if (s.x0 < clef.x1 - 0.3 * sp || s.x0 > clef.x1 + 1.2 * sp) continue;
+            if (s.cy() > clef.cy() + 0.3 * sp) continue;                 // upper half of the staff
+            if (h >= 0.3 && h <= 1.3) { n++; found.add(s); }
+            else if (h > 1.5 && h < 2.5 && s.ink > 0.6) { n += 2; found.add(s); }   // dots joined by the line
+        }
+        if (n < 2) found.clear();
+        return n >= 2;
     }
 
     static int diatonicToMidi(int d) {

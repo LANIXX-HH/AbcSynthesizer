@@ -14,7 +14,7 @@ public class ImageTest {
     for (int i = 1; i < a.length; i++) {
       BufferedImage im = ImageIO.read(new File(a[i]));
       int w = im.getWidth(), h = im.getHeight(); byte[] px = new byte[w * h];
-      for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int rgb = im.getRGB(x, y); int g = ((rgb >> 16 & 255) * 3 + (rgb >> 8 & 255) * 6 + (rgb & 255)) / 10; px[y * w + x] = (byte) g; }
+      for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { if (im.getType() == BufferedImage.TYPE_BYTE_GRAY) { px[y * w + x] = (byte) im.getRaster().getSample(x, y, 0); continue; } int rgb = im.getRGB(x, y); int g = ((rgb >> 16 & 255) * 3 + (rgb >> 8 & 255) * 6 + (rgb & 255)) / 10; px[y * w + x] = (byte) g; }
       pages.addAll(ImageScoreReader.read(new ImageScoreReader.Gray(w, h, px)));
     }
     Score s = PdfScoreExtractor.extract(pages);

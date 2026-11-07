@@ -48,6 +48,10 @@ public final class PdfReader {
         public char glyph;
         /** for bitmaps: share of inked pixels (-1 = vector path, unknown) */
         public double ink = -1;
+        /** Bitmaps: share of the ink in the upper half (a flat has little, a sharp about half). */
+        public double upperInk = -1;
+        /** Bitmaps: middle of the rows where the sign is at its widest (a flat's bowl), -1 = unknown. */
+        public double bowlY = -1;
         /** bounding box per subpath: {x0, y0, x1, y1}, top-left origin */
         public final List<double[]> subs = new ArrayList<>();
 
