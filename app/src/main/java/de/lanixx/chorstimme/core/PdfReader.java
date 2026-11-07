@@ -93,6 +93,8 @@ public final class PdfReader {
         public final List<Shape> shapes = new ArrayList<>();
         public final List<TextItem> texts = new ArrayList<>();
         public final List<Glyph> glyphs = new ArrayList<>();
+        /** Pictures only: staff space in pixels as delivered (before any enlarging), 0 = no staff. */
+        public double sourceStaffSpacePx = -1;
     }
 
     private static final java.util.regex.Pattern MUSIC_FONT = java.util.regex.Pattern.compile(

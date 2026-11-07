@@ -6,6 +6,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -199,7 +200,7 @@ public class MainActivity extends Activity {
 
         openPdf.setOnClickListener(v -> open(REQ_OPEN_PDF, "application/pdf"));
         openAbc.setOnClickListener(v -> open(REQ_OPEN_ABC, "*/*"));
-        openImage.setOnClickListener(v -> open(REQ_OPEN_IMAGE, "image/*"));
+        openImage.setOnClickListener(v -> openImageWithHint());
         pasteAbc.setOnClickListener(v -> pasteDialog());
 
         infoView = new TextView(this);
@@ -409,6 +410,44 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /** First time only: what a picture needs to be read well. */
+    private void openImageWithHint() {
+        SharedPreferences prefs = getSharedPreferences("chorstimme", MODE_PRIVATE);
+        if (prefs.getBoolean("imageHintSeen", false)) {
+            open(REQ_OPEN_IMAGE, "image/*");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Gute Bilder für die Notenerkennung")
+                .setMessage(IMAGE_HINT)
+                .setPositiveButton("Bild wählen", (d, w) -> open(REQ_OPEN_IMAGE, "image/*"))
+                .setNeutralButton("Nicht mehr anzeigen", (d, w) -> {
+                    prefs.edit().putBoolean("imageHintSeen", true).apply();
+                    open(REQ_OPEN_IMAGE, "image/*");
+                })
+                .show();
+    }
+
+    private static final String IMAGE_HINT =
+            "• Gedruckte Noten, Seite gerade, scharf und gleichmäßig hell.\n"
+            + "• Kamerafoto in voller Größe ist gut. Messenger verkleinern Fotos: "
+            + "in WhatsApp „als Dokument“ senden.\n"
+            + "• Screenshot: so weit hineinzoomen, dass höchstens eine halbe Seite "
+            + "den Bildschirm füllt. Mehrere Bilder kann man auf einmal wählen.\n"
+            + "• Liedtext und Titel werden aus Bildern nicht gelesen.\n"
+            + "• Gibt es die Noten als PDF, ist die PDF besser.";
+
+    /** Staff space in pixels as found in the picture: below about 12 the result gets unreliable. */
+    private static String resolutionWarning(List<PdfReader.PageData> pages) {
+        double min = Double.MAX_VALUE;
+        for (PdfReader.PageData p : pages) if (p.sourceStaffSpacePx > 0) min = Math.min(min, p.sourceStaffSpacePx);
+        if (min == Double.MAX_VALUE || min >= 12) return null;
+        String level = min < 10 ? "Das Bild ist zu klein für eine zuverlässige Erkennung" : "Das Bild ist knapp aufgelöst";
+        return level + String.format(java.util.Locale.GERMAN,
+                " (Notenlinien %.0f Pixel auseinander, gut sind ab 14). Bild in voller Größe verwenden "
+                        + "(WhatsApp: „als Dokument“ senden) oder die Seite in zwei Hälften fotografieren.", min);
+    }
+
     private static List<Uri> one(Uri uri) {
         List<Uri> l = new ArrayList<>();
         l.add(uri);
@@ -439,6 +478,8 @@ public class MainActivity extends Activity {
                     s.title = stripExt(name);               // no text is read from pictures
                     s.warnings.add(0, "Aus Bildern werden nur die Noten gelesen, kein Liedtext und keine Überschrift. "
                             + "Ergebnis kann einzelne Fehler enthalten: beim Anhören prüfen, ggf. die ABC-Datei korrigieren.");
+                    String res = resolutionWarning(pages);
+                    if (res != null) s.warnings.add(0, res);
                 } else {
                     s = AbcParser.parse(new String(data, StandardCharsets.UTF_8));
                 }

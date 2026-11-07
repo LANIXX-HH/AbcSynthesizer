@@ -55,6 +55,7 @@ public final class ImageScoreReader {
 
         List<int[]> lines = staffLines(ink, w, h);           // {y0, y1, x0, x1}
         double sp = staffSpace(lines);
+        double sourceSp = sp;
         // small pictures (messenger apps shrink photos): heads only 8-9 pixels high are too
         // coarse for hollow/filled and stem tests. Enlarge so a staff space is about 14 pixels
         if (sp > 0 && sp < MIN_SP_PX) {
@@ -67,6 +68,7 @@ public final class ImageScoreReader {
         }
         List<PageData> out = new ArrayList<>();
         PageData pd = new PageData();
+        pd.sourceStaffSpacePx = sourceSp;
         out.add(pd);
         if (sp <= 0) return out;
         double k = TARGET_SP / sp;
