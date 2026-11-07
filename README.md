@@ -1,6 +1,6 @@
 # Chorstimme
 
-Android-App: Noten-PDF (aus abcjs gedruckt) oder ABC-Notation laden → Übungsaufnahme als
+Android-App: Noten-PDF, Foto/Scan von Noten oder ABC-Notation laden → Übungsaufnahme als
 MP3 (synthetischer Chor, singt die Vokale des Textes) und MIDI-Datei. Alles läuft offline auf
 dem Handy.
 
@@ -10,6 +10,10 @@ dem Handy.
   Punkte, Pausen, Vorzeichen, Haltebögen, Triolen, Schlüssel, Liedtext) und baut daraus die Noten.
   Mehrere Stimmen pro System (Sopran/Alt auf einem System) und mehrere Systeme pro Zeile
   (SATB) werden unterstützt.
+- **Bild / Foto** – Scan, Screenshot oder gerade aufgenommenes Foto gedruckter Noten (auch
+  mehrere Seiten auf einmal, oder aus der Galerie/Kamera-App „Teilen → Chorstimme“). Die App
+  erkennt Notenlinien, Schlüssel, Vorzeichen, Köpfe, Hälse, Fähnchen, Balken, Pausen und
+  Punkte direkt im Bild (offline) und liefert MP3, MIDI und ABC wie bei einer PDF.
 - **ABC-Datei / ABC-Text** – direkter Import der ABC-Notation (Stimmen, Vorzeichen, Bögen,
   Triolen, punktierte Rhythmen, Wiederholungen mit 1./2. Klammer, `w:`-Text).
 - **Tempo** 50–150 %, **Stimme hervorheben** („Alt betont“, „Nur Alt“), **Einzähler**.
@@ -27,8 +31,13 @@ dem Handy.
 
 - PDFs: Notensatz von **abcjs** (Druck aus dem Browser), **Finale** mit Notenschrift
   „Maestro“ (z. B. Noten von azbyka.ru) und ältere PDFs, deren Notenzeichen als kleine
-  Bitmaps (Type3-Schriften, Acrobat Distiller) gespeichert sind. Gescannte Noten oder PDFs aus Sibelius/MuseScore/LilyPond
-  werden nicht erkannt.
+  Bitmaps (Type3-Schriften, Acrobat Distiller) gespeichert sind. PDFs aus
+  Sibelius/MuseScore/LilyPond werden nicht erkannt (Ausweg: Screenshot der Seite als Bild laden).
+- Bilder: gedruckte Noten, Seite gerade (bis etwa 3° schief) und scharf, gleichmäßig hell.
+  Liedtext und Titel werden aus Bildern **nicht** gelesen (Titel = Dateiname). Handschrift,
+  stark verzerrte Fotos (schräg von der Seite) und Triolen-Ziffern werden nicht erkannt.
+  Auf Testseiten: 88–100 % der Tonhöhen und 81–100 % der Notenwerte richtig – beim Anhören
+  prüfen und Fehler bei Bedarf in der ABC-Datei korrigieren.
 - Ohne Stimmnamen in der PDF werden die Stimmen aus den Notenhälsen erkannt und
   Sopran/Alt/Tenor/Bass genannt (bei 4 Stimmen).
 - Wiederholungszeichen in PDFs werden erkannt, aber nicht ausgeschrieben (Hinweis erscheint).
@@ -58,6 +67,8 @@ Bedarf selbst.
 | `app/src/main/java/.../MainActivity.java` | Oberfläche |
 | `core/PdfReader.java` | PDF-Vektorpfade und Text auslesen (PdfBox-Android) |
 | `core/PdfScoreExtractor.java` | Notenerkennung aus den Vektorformen (relativ zum Linienabstand) |
+| `core/ImageScoreReader.java` | Bilder: Schwellwert, Schräglage, Notenlinien, Hälse/Taktstriche, Zeichen als Formen für den Extraktor |
+| `ImageDecoder.java` | Bild dekodieren (EXIF-Drehung, Verkleinern, Graustufen) |
 | `core/AbcParser.java` | ABC-Notation |
 | `core/ChoirSynth.java` | Chorklang: additive Formant-Synthese, Vibrato, Hall |
 | `core/MidiWriter.java` | MIDI-Datei |

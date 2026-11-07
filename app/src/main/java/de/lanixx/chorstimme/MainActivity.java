@@ -36,6 +36,7 @@ import com.tom_roush.pdfbox.android.PDFBoxResourceLoader;
 import de.lanixx.chorstimme.core.AbcParser;
 import de.lanixx.chorstimme.core.AbcWriter;
 import de.lanixx.chorstimme.core.ChoirSynth;
+import de.lanixx.chorstimme.core.ImageScoreReader;
 import de.lanixx.chorstimme.core.MidiWriter;
 import de.lanixx.chorstimme.core.Mp3Encoder;
 import de.lanixx.chorstimme.core.PdfReader;
@@ -66,6 +67,7 @@ public class MainActivity extends Activity {
     private static final int REQ_SAVE_MP3 = 3;
     private static final int REQ_SAVE_MIDI = 4;
     private static final int REQ_SAVE_ABC = 5;
+    private static final int REQ_OPEN_IMAGE = 6;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -187,11 +189,17 @@ public class MainActivity extends Activity {
         row.addView(openPdf, weight());
         row.addView(openAbc, weight());
         root.addView(row, matchWrap(dp(12)));
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        Button openImage = button("Bild / Foto");
         Button pasteAbc = button("ABC-Text einfügen");
-        root.addView(pasteAbc, matchWrap(0));
+        row2.addView(openImage, weight());
+        row2.addView(pasteAbc, weight());
+        root.addView(row2, matchWrap(0));
 
         openPdf.setOnClickListener(v -> open(REQ_OPEN_PDF, "application/pdf"));
         openAbc.setOnClickListener(v -> open(REQ_OPEN_ABC, "*/*"));
+        openImage.setOnClickListener(v -> open(REQ_OPEN_IMAGE, "image/*"));
         pasteAbc.setOnClickListener(v -> pasteDialog());
 
         infoView = new TextView(this);
@@ -355,6 +363,8 @@ public class MainActivity extends Activity {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType(mime);
+        // several photos = several pages, in the order chosen
+        if (req == REQ_OPEN_IMAGE) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(i, req);
     }
 
@@ -362,12 +372,15 @@ public class MainActivity extends Activity {
         if (intent == null) return;
         String action = intent.getAction();
         if (Intent.ACTION_VIEW.equals(action) && intent.getData() != null) {
-            load(intent.getData(), null);
+            load(one(intent.getData()));
         } else if (Intent.ACTION_SEND.equals(action)) {
             Uri stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
             String text = intent.getStringExtra(Intent.EXTRA_TEXT);
-            if (stream != null) load(stream, null);
+            if (stream != null) load(one(stream));
             else if (text != null) loadAbcText(text, "ABC-Text");
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+            ArrayList<Uri> streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (streams != null && !streams.isEmpty()) load(streams);
         }
     }
 
@@ -396,17 +409,36 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void load(Uri uri, Integer req) {
-        if (busy) return;
-        String name = displayName(uri);
-        setBusy(true, "Lese " + name + " …");
+    private static List<Uri> one(Uri uri) {
+        List<Uri> l = new ArrayList<>();
+        l.add(uri);
+        return l;
+    }
+
+    /** PDF, ABC text, or one or more pictures (each picture one page). */
+    private void load(List<Uri> uris) {
+        if (busy || uris.isEmpty()) return;
+        String name = displayName(uris.get(0));
+        setBusy(true, "Lese " + name + (uris.size() > 1 ? " (+" + (uris.size() - 1) + ")" : "") + " …");
         worker.execute(() -> {
             try {
-                byte[] data = readAll(uri);
+                byte[] data = readAll(uris.get(0));
                 boolean pdf = data.length > 4 && data[0] == '%' && data[1] == 'P' && data[2] == 'D' && data[3] == 'F';
                 Score s;
                 if (pdf) {
                     s = PdfScoreExtractor.extract(PdfReader.read(new java.io.ByteArrayInputStream(data)));
+                } else if (ImageDecoder.isImage(data)) {
+                    List<PdfReader.PageData> pages = new ArrayList<>();
+                    for (int i = 0; i < uris.size(); i++) {
+                        final int n = i + 1;
+                        if (uris.size() > 1) ui.post(() -> statusView.setText("Erkenne Noten auf Bild " + n + " von " + uris.size() + " …"));
+                        byte[] d = i == 0 ? data : readAll(uris.get(i));
+                        pages.addAll(ImageScoreReader.read(ImageDecoder.decode(d)));
+                    }
+                    s = PdfScoreExtractor.extract(pages);
+                    s.title = stripExt(name);               // no text is read from pictures
+                    s.warnings.add(0, "Aus Bildern werden nur die Noten gelesen, kein Liedtext und keine Überschrift. "
+                            + "Ergebnis kann einzelne Fehler enthalten: beim Anhören prüfen, ggf. die ABC-Datei korrigieren.");
                 } else {
                     s = AbcParser.parse(new String(data, StandardCharsets.UTF_8));
                 }
@@ -585,12 +617,24 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
         super.onActivityResult(req, result, data);
-        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (result != RESULT_OK || data == null) return;
+        if (req == REQ_OPEN_IMAGE) {
+            List<Uri> uris = new ArrayList<>();
+            ClipData clip = data.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) uris.add(clip.getItemAt(i).getUri());
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+            load(uris);
+            return;
+        }
+        if (data.getData() == null) return;
         Uri uri = data.getData();
         switch (req) {
             case REQ_OPEN_PDF:
             case REQ_OPEN_ABC:
-                load(uri, req);
+                load(one(uri));
                 break;
             case REQ_SAVE_MP3:
                 if (mp3 != null) write(uri, mp3, "MP3");

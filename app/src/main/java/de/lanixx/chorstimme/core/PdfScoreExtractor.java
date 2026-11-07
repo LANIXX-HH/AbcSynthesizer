@@ -869,14 +869,14 @@ public final class PdfScoreExtractor {
             if (h < 0.15) continue;                                  // ledger line
             // bitmap glyphs: a filled head is mostly ink; accents, boxes etc. are not
             boolean headInk = s.ink < 0 || s.subpaths >= 2 || s.ink > 0.5;
-            if (s.curved && headInk && h >= 0.85 && h <= 1.25 && w >= 1.05 && w <= 1.55) {
+            if (s.curved && headInk && h >= 0.85 && h <= (s.ink >= 0 ? 1.35 : 1.25) && w >= 1.05 && w <= 1.55) {
                 Head hd = new Head();
                 hd.s = s;
                 hd.kind = s.subpaths >= 2 ? 2 : 1;
                 heads.add(hd);
                 continue;
             }
-            if (s.curved && h >= 0.85 && h <= 1.25 && w >= 1.7 && w <= 2.3 && s.subpaths >= 2) {
+            if (s.curved && h >= 0.85 && h <= 1.35 && w >= (s.ink >= 0 ? 1.6 : 1.7) && w <= 2.3 && s.subpaths >= 2) {
                 Head hd = new Head();
                 hd.s = s;
                 hd.kind = 4;
@@ -891,7 +891,9 @@ public final class PdfScoreExtractor {
                 continue;
             }
             if (s.curved && w >= 0.3 && w <= 0.65 && h >= 0.3 && h <= 0.65) { dots.add(s); continue; }
-            if (s.curved && h > 5.5 || s.curved && h > 2.5 && w > 2.2) {
+            boolean atStart = s.x0 < st.x0 + 4 * sp;
+            if (s.curved && h > 5.5 || s.curved && h > 2.5 && w > 2.2
+                    || s.curved && atStart && h > 2.5 && h < 4.6 && w > 1.7) {
                 if (clef == null || s.x0 < clef.x0) clef = s;
                 continue;
             }
@@ -1006,9 +1008,11 @@ public final class PdfScoreExtractor {
             double w = s.w() / sp, h = s.h() / sp;
             Shape stem = null;
             if (s.curved && w >= 0.65 && w <= 1.3 && h >= 2.2 && h <= 3.5) {
+                // in scanned images the flag loses the rows where it joins the stem
+                double tol = s.ink >= 0 ? 1.0 * sp : 0.5 * sp;
                 for (Shape stm : stems) {
                     if (Math.abs(s.x0 - stm.x0) < 0.4 * sp
-                            && (Math.abs(s.y0 - stm.y0) < 0.5 * sp || Math.abs(s.y1 - stm.y1) < 0.5 * sp)) {
+                            && (Math.abs(s.y0 - stm.y0) < tol || Math.abs(s.y1 - stm.y1) < tol)) {
                         stem = stm;
                         break;
                     }
@@ -1438,8 +1442,8 @@ public final class PdfScoreExtractor {
         int n = 0;
         for (Shape b : beams) {
             for (double[] r : b.subs) {
-                if (x < r[0] - 0.3 || x > r[2] + 0.3) continue;
-                if (r[2] - r[0] > 1.6 * sp && stemsUnder(r, stems) < 2) continue;   // hairpin, not a beam
+                if (x < r[0] - 0.3 * sp || x > r[2] + 0.3 * sp) continue;
+                if (r[2] - r[0] > 1.6 * sp && stemsUnder(r, stems, sp) < 2) continue;   // hairpin, not a beam
                 double lo = up ? tip - 0.6 * sp : tip - 2.6 * sp;
                 double hi = up ? tip + 2.6 * sp : tip + 0.6 * sp;
                 if (r[3] >= lo && r[1] <= hi) n++;
@@ -1448,10 +1452,10 @@ public final class PdfScoreExtractor {
         return Math.min(n, 4);
     }
 
-    private static int stemsUnder(double[] r, List<Shape> stems) {
+    private static int stemsUnder(double[] r, List<Shape> stems, double sp) {
         int n = 0;
         for (Shape s : stems) {
-            boolean inX = s.cx() >= r[0] - 0.5 && s.cx() <= r[2] + 0.5;
+            boolean inX = s.cx() >= r[0] - 0.3 * sp && s.cx() <= r[2] + 0.3 * sp;
             boolean touches = s.y0 <= r[3] + 1 && s.y1 >= r[1] - 1;
             if (inX && touches) n++;
         }
@@ -1532,7 +1536,11 @@ public final class PdfScoreExtractor {
             return;
         }
         double h = clef.h() / sp;
-        if (h > 5.5) {
+        if (h > 7.8 && clef.ink >= 0) {
+            // scanned image: the small "8" below grew into the clef's blob
+            st.clef = "treble-8";
+            st.bottomDiatonic = 23;
+        } else if (h > 5.5) {
             st.clef = "treble";
             st.bottomDiatonic = 30;              // E4
         } else if (h < 3.5) {
